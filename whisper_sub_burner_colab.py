@@ -1,8 +1,6 @@
 # ==========================================
 # 0. 安裝必要套件 / Install dependencies
 # ==========================================
-!pip install -q "git+https://github.com/openai/whisper.git" googletrans==4.0.0-rc1
-
 import os
 import json
 from pathlib import Path
