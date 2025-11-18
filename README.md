@@ -140,8 +140,8 @@ This project is designed primarily for **Google Colab** or environments where yo
 ### 1. 下載此專案
 
 ```bash
-git clone https://github.com/<YOUR_USERNAME>/<YOUR_REPO_NAME>.git
-cd <YOUR_REPO_NAME>
+git clone https://github.com/digimarketingai/HardsubGenerator.git
+cd HardsubGenerator
 ```
 
 ### 2. Install dependencies
