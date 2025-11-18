@@ -7,14 +7,18 @@ whisper_subtitle_tool.py
 Transcribe a video with OpenAI Whisper, translate subtitles with googletrans,
 and burn translated subtitles into the video using ffmpeg drawtext.
 
-Usage in Google Colab (recommended workflow):
+Usage in Colab (with upload widget):
 
-  1) Upload your video in the left "Files" panel, e.g. it becomes /content/myvideo.mp4
-  2) Run:
-        !python whisper_subtitle_tool.py
-  3) When asked for "Video path", type: /content/myvideo.mp4
+    %run whisper_subtitle_tool.py
+    # or
+    import whisper_subtitle_tool
+    whisper_subtitle_tool.main()
 
-Usage in local shell:
+Usage in Colab (without widget, manual path):
+
+    !python whisper_subtitle_tool.py
+
+Usage locally:
 
     python whisper_subtitle_tool.py
 """
@@ -40,7 +44,6 @@ def ensure_pip_package(pkg_spec: str):
     pkg_spec can be 'whisper' or 'git+https://github.com/openai/whisper.git', etc.
     """
     try:
-        # Try importing by module name, if it looks like that
         if "git+" not in pkg_spec and "==" in pkg_spec:
             mod_name = pkg_spec.split("==", 1)[0]
         elif "git+" not in pkg_spec and "[" not in pkg_spec and "<" not in pkg_spec and ">" not in pkg_spec:
@@ -62,9 +65,7 @@ def ensure_pip_package(pkg_spec: str):
 
 def ensure_dependencies():
     """Install or import all necessary dependencies."""
-    # Whisper from GitHub
     ensure_pip_package("git+https://github.com/openai/whisper.git")
-    # googletrans
     ensure_pip_package("googletrans==4.0.0-rc1")
 
     global torch, whisper, Translator
@@ -109,7 +110,6 @@ def ensure_font(font_dir: Path) -> Path:
     url = "https://noto-website-2.storage.googleapis.com/pkgs/NotoSansCJK-Regular.ttc.zip"
 
     try:
-        # Download zip into memory
         with urllib.request.urlopen(url) as resp:
             data = resp.read()
     except Exception as e:
@@ -118,19 +118,15 @@ def ensure_font(font_dir: Path) -> Path:
             "請確認網路連線後再試。/ Please check your network and retry."
         )
 
-    # Unzip and extract .ttc
     try:
         with zipfile.ZipFile(BytesIO(data)) as zf:
-            # Find first .ttc inside zip
             ttc_names = [n for n in zf.namelist() if n.lower().endswith(".ttc")]
             if not ttc_names:
                 raise SystemExit("ZIP 中找不到 .ttc 字型檔 / No .ttc font in ZIP.")
-            # Use the first .ttc
             ttc_name = ttc_names[0]
             print("從 ZIP 取出字型 / Extracting font from ZIP:", ttc_name)
             zf.extract(ttc_name, path=font_dir)
             extracted_path = font_dir / ttc_name
-            # Move / rename to NotoSansCJK-Regular.ttc at root of fonts/
             extracted_path.rename(font_path)
     except Exception as e:
         raise SystemExit(
@@ -146,37 +142,70 @@ def ensure_font(font_dir: Path) -> Path:
 
 
 # ------------------------------------------
-# 3. Get video file (ALWAYS by path; no Colab upload widget)
+# 3. Get video file (Colab upload if possible, else manual path)
 # ------------------------------------------
 def get_video_file(upload_dir: Path) -> Path:
-    print(
-        "\n請輸入要處理的影片檔路徑（mp4, mkv, mov 等）。\n"
-        "In Colab, please FIRST upload the file via the left 'Files' panel\n"
-        "or another cell (e.g. `from google.colab import files; files.upload()`),\n"
-        "then enter its path here (e.g. /content/myvideo.mp4).\n"
-    )
-    path_str = input("影片檔路徑 / Video path: ").strip()
-    if not path_str:
-        raise SystemExit("未提供路徑 / No path provided.")
+    """
+    Try to use google.colab.files.upload() if running inside a Colab
+    notebook kernel. If that fails (e.g., when called via `!python`),
+    fall back to asking for a file path.
+    """
+    # Try Colab upload widget
+    try:
+        from google.colab import files  # type: ignore
+        from IPython import get_ipython  # type: ignore
 
-    src = Path(path_str).expanduser().resolve()
-    if not src.exists():
-        raise SystemExit(f"找不到影片檔 / Video not found: {src}")
+        ip = get_ipython()
+        if ip is not None and hasattr(ip, "kernel"):
+            print(
+                "\n請上傳要處理的影片檔（mp4, mkv, mov 等） / "
+                "Please upload the video file (mp4, mkv, mov, etc.)"
+            )
+            uploaded = files.upload()
+            if not uploaded:
+                raise SystemExit("未上傳任何檔案 / No file uploaded.")
 
-    # Copy or use directly
-    video_path = upload_dir / src.name
-    if src != video_path:
-        import shutil
-        shutil.copy2(src, video_path)
+            up_name = list(uploaded.keys())[0]
+            tmp_path = Path(up_name)
+            video_path = upload_dir / up_name
+            if tmp_path.exists():
+                tmp_path.rename(video_path)
 
-    if not video_path.exists():
-        raise SystemExit(
-            "影片檔不存在，請重試上傳或檢查路徑。/ "
-            "Video file does not exist; please re-upload or check path."
+            print("影片路徑 / Video path:", video_path)
+            return video_path
+        else:
+            # Not in a real IPython kernel (e.g. `!python`), will go to except below
+            raise RuntimeError("Not in main Colab kernel.")
+    except Exception:
+        # Fallback: ask for path
+        print(
+            "\n⚠ 無法使用 Colab 上傳介面（可能是從 `!python` 執行）。\n"
+            "Please enter the full path to the video file.\n"
+            "In Colab, upload the file via the left 'Files' panel\n"
+            "and then enter its path here (e.g. /content/myvideo.mp4).\n"
         )
+        path_str = input("影片檔路徑 / Video path: ").strip()
+        if not path_str:
+            raise SystemExit("未提供路徑 / No path provided.")
 
-    print("影片路徑 / Video path (copied to uploads/):", video_path)
-    return video_path
+        src = Path(path_str).expanduser().resolve()
+        if not src.exists():
+            raise SystemExit(f"找不到影片檔 / Video not found: {src}")
+
+        # Copy into uploads/ for consistent handling
+        video_path = upload_dir / src.name
+        if src != video_path:
+            import shutil
+            shutil.copy2(src, video_path)
+
+        if not video_path.exists():
+            raise SystemExit(
+                "影片檔不存在，請重試上傳或檢查路徑。/ "
+                "Video file does not exist; please re-upload or check path."
+            )
+
+        print("影片路徑 / Video path (copied to uploads/):", video_path)
+        return video_path
 
 
 # ------------------------------------------
@@ -318,7 +347,6 @@ def build_drawtext_filter(
 ):
     print("\n建立 drawtext 濾鏡字串 ... / Building drawtext filter string ...")
 
-    # Probe video resolution
     probe_cmd = [
         "ffprobe", "-v", "error",
         "-select_streams", "v:0",
@@ -353,9 +381,8 @@ def build_drawtext_filter(
 
         start = float(seg.get("start", 0.0))
         end = float(seg.get("end", start + 1.0))
-        end = end + 0.05  # small buffer
+        end = end + 0.05
 
-        # Escape text for ffmpeg drawtext
         safe_text = (
             txt.replace("\\", "\\\\")
                .replace("'", "’")
@@ -409,8 +436,8 @@ def burn_subtitles(
         "ffmpeg", "-y",
         "-i", str(video_path),
         "-filter_complex", vf_filter,
-        "-map", output_label,     # last video label
-        "-map", "0:a?",           # original audio if exists
+        "-map", output_label,
+        "-map", "0:a?",
         "-c:v", "libx264",
         "-preset", "fast",
         "-crf", "22",
@@ -448,7 +475,7 @@ def burn_subtitles(
 def main():
     ensure_dependencies()
 
-    global torch, whisper, Translator  # imported in ensure_dependencies
+    global torch, whisper, Translator
 
     cwd, upload_dir, out_dir, font_dir = prepare_directories()
     font_path = ensure_font(font_dir)
