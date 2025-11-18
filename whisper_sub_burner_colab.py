@@ -7,32 +7,28 @@ whisper_subtitle_tool.py
 Transcribe a video with OpenAI Whisper, translate subtitles with googletrans,
 and burn translated subtitles into the video using ffmpeg drawtext.
 
-Usage (in Google Colab):
-    !python whisper_subtitle_tool.py
+Usage in Google Colab (recommended workflow):
 
-Usage (local shell):
+  1) Upload your video in the left "Files" panel, e.g. it becomes /content/myvideo.mp4
+  2) Run:
+        !python whisper_subtitle_tool.py
+  3) When asked for "Video path", type: /content/myvideo.mp4
+
+Usage in local shell:
+
     python whisper_subtitle_tool.py
 """
 
-import os
 import sys
 import json
 import subprocess
 import shlex
 from pathlib import Path
 
-# ------------------------------------------
-# 0. Utility: environment & dependencies
-# ------------------------------------------
-def in_colab() -> bool:
-    """Detect if running inside Google Colab."""
-    try:
-        import google.colab  # type: ignore
-        return True
-    except Exception:
-        return False
 
-
+# ------------------------------------------
+# 0. Utility: dependencies & subprocess
+# ------------------------------------------
 def run_cmd(cmd, check=True, capture_output=True, text=True):
     """Helper to run subprocess commands with basic error handling."""
     return subprocess.run(cmd, check=check, capture_output=capture_output, text=text)
@@ -66,12 +62,11 @@ def ensure_pip_package(pkg_spec: str):
 
 def ensure_dependencies():
     """Install or import all necessary dependencies."""
-    # Whisper from GitHub (same as your cell)
+    # Whisper from GitHub
     ensure_pip_package("git+https://github.com/openai/whisper.git")
     # googletrans
     ensure_pip_package("googletrans==4.0.0-rc1")
 
-    # Now import them
     global torch, whisper, Translator
     import torch  # type: ignore
     import whisper  # type: ignore
@@ -151,39 +146,28 @@ def ensure_font(font_dir: Path) -> Path:
 
 
 # ------------------------------------------
-# 3. Get video file (Colab upload or local path)
+# 3. Get video file (ALWAYS by path; no Colab upload widget)
 # ------------------------------------------
 def get_video_file(upload_dir: Path) -> Path:
-    if in_colab():
-        # Colab: use upload widget
-        from google.colab import files  # type: ignore
+    print(
+        "\n請輸入要處理的影片檔路徑（mp4, mkv, mov 等）。\n"
+        "In Colab, please FIRST upload the file via the left 'Files' panel\n"
+        "or another cell (e.g. `from google.colab import files; files.upload()`),\n"
+        "then enter its path here (e.g. /content/myvideo.mp4).\n"
+    )
+    path_str = input("影片檔路徑 / Video path: ").strip()
+    if not path_str:
+        raise SystemExit("未提供路徑 / No path provided.")
 
-        print("\n請上傳要處理的影片檔（mp4, mkv, mov 等） / "
-              "Please upload the video file (mp4, mkv, mov, etc.)")
-        uploaded = files.upload()
-        if not uploaded:
-            raise SystemExit("未上傳任何檔案 / No file uploaded.")
+    src = Path(path_str).expanduser().resolve()
+    if not src.exists():
+        raise SystemExit(f"找不到影片檔 / Video not found: {src}")
 
-        up_name = list(uploaded.keys())[0]
-        tmp_path = Path(up_name)
-        video_path = upload_dir / up_name
-        if tmp_path.exists():
-            tmp_path.rename(video_path)
-    else:
-        # Non-Colab: ask user for a path
-        print("\n請輸入要處理的影片檔路徑（mp4, mkv, mov 等） / "
-              "Please enter the video file path (mp4, mkv, mov, etc.)")
-        path_str = input("影片檔路徑 / Video path: ").strip()
-        if not path_str:
-            raise SystemExit("未提供路徑 / No path provided.")
-        src = Path(path_str).expanduser().resolve()
-        if not src.exists():
-            raise SystemExit(f"找不到影片檔 / Video not found: {src}")
-        # Copy or use directly
-        video_path = upload_dir / src.name
-        if src != video_path:
-            import shutil
-            shutil.copy2(src, video_path)
+    # Copy or use directly
+    video_path = upload_dir / src.name
+    if src != video_path:
+        import shutil
+        shutil.copy2(src, video_path)
 
     if not video_path.exists():
         raise SystemExit(
@@ -191,7 +175,7 @@ def get_video_file(upload_dir: Path) -> Path:
             "Video file does not exist; please re-upload or check path."
         )
 
-    print("影片路徑 / Video path:", video_path)
+    print("影片路徑 / Video path (copied to uploads/):", video_path)
     return video_path
 
 
@@ -236,15 +220,6 @@ def extract_audio(video_path: Path, upload_dir: Path) -> Path:
         raise SystemExit("抽取音訊失敗 / Failed to extract audio.")
 
     print("音訊檔案 / Audio file:", audio_path)
-
-    # In Colab you can optionally play it, but script will continue either way
-    if in_colab():
-        try:
-            from IPython.display import Audio, display  # type: ignore
-            display(Audio(filename=str(audio_path)))
-        except Exception:
-            pass
-
     return audio_path
 
 
@@ -454,8 +429,7 @@ def burn_subtitles(
         print(proc.stderr)
         print("\n✅ 成功產生含字幕影片 / Subtitled video created:")
         print("  ", out_mp4)
-        if in_colab():
-            print("\n請在左側 Files 面板展開 transcripts/，下載該 mp4。")
+        print("\n請在左側 Files 面板展開 transcripts/，下載該 mp4。")
     else:
         print("=== ffmpeg stdout ===")
         print(proc.stdout)
@@ -477,7 +451,7 @@ def main():
     global torch, whisper, Translator  # imported in ensure_dependencies
 
     cwd, upload_dir, out_dir, font_dir = prepare_directories()
-    font_path = ensure_font(font_dir)  # <-- auto download + install from your URL
+    font_path = ensure_font(font_dir)
 
     video_path = get_video_file(upload_dir)
 
