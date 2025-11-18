@@ -1,210 +1,498 @@
-# ==============================================================================
-# Full Python Script to Download a Font and Burn Subtitles into a Video
-#
-# Dependencies:
-#   - Python 3.6+
-#   - 'requests' library (`pip install requests`)
-#   - ffmpeg (must be installed and available in the system's PATH)
-# ==============================================================================
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
 
-import os
-import subprocess
-import requests
-from pathlib import Path
+"""
+whisper_subtitle_tool.py
 
-# ==========================================
-# 1. 設定目錄 / Setup Directories
-# ==========================================
-# Create directories for fonts, input, and output files for good organization.
-FONT_DIR = Path("./fonts")
-VIDEO_DIR = Path("./videos")
-OUTPUT_DIR = Path("./output")
+Transcribe a video with OpenAI Whisper, translate subtitles with googletrans,
+and burn translated subtitles into the video using ffmpeg drawtext.
 
-FONT_DIR.mkdir(exist_ok=True)
-VIDEO_DIR.mkdir(exist_ok=True)
-OUTPUT_DIR.mkdir(exist_ok=True)
+Usage (in Google Colab):
+    !python whisper_subtitle_tool.py
 
-print("✅ Directories ensured to exist: ./fonts, ./videos, ./output")
-
-# ==========================================
-# 2. 下載字型（Noto Sans CJK） / Download Font
-# ==========================================
-# This section has been refactored to encapsulate the download logic.
-# It still uses a primary and a fallback URL for robustness.
-FONT_NAME = "NotoSansSC-Regular.otf"
-FONT_PATH = FONT_DIR / FONT_NAME
-
-def download_font_with_fallback(font_filename, destination_path):
-    """
-    Downloads the specified font, trying a primary URL first and then a fallback.
-
-    This function encapsulates the entire download process, including error handling
-    and logging for each attempt.
-
-    Args:
-        font_filename (str): The name of the font file (e.g., "NotoSansSC-Regular.otf").
-        destination_path (Path): The path object where the file will be saved.
-
-    Returns:
-        bool: True if download was successful, False otherwise.
-    """
-    # The font family is 'notosanssc' in the Google Fonts repository URL structure.
-    font_family_url_part = "notosanssc"
-    
-    # URL 1: Primary source from the official Google Fonts GitHub repository.
-    font_url_primary = f"https://github.com/google/fonts/raw/main/ofl/{font_family_url_part}/{font_filename}"
-
-    # URL 2: Fallback source from the reliable jsDelivr CDN, which mirrors GitHub.
-    font_url_fallback = f"https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/{font_family_url_part}/{font_filename}"
-
-    def _download_attempt(url, destination):
-        """Inner function to handle a single download attempt."""
-        try:
-            print(f"   Attempting to download from: {url}")
-            # Use a timeout to prevent the script from hanging indefinitely.
-            with requests.get(url, stream=True, timeout=30) as r:
-                r.raise_for_status()  # Raise an exception for bad status codes (4xx or 5xx)
-                with open(destination, 'wb') as f:
-                    for chunk in r.iter_content(chunk_size=8192):
-                        f.write(chunk)
-            print(f"   Successfully downloaded to {destination}")
-            return True
-        except requests.exceptions.RequestException as e:
-            print(f"   Download attempt failed: {e}")
-            return False
-
-    # --- Main Download Logic ---
-    print(f"\n⏳ 下載字型 {font_filename} ... / Downloading font {font_filename} ...")
-    if _download_attempt(font_url_primary, destination_path):
-        print("✅ 字型已成功下載 / Font successfully downloaded.")
-        return True
-    else:
-        print("\n   Primary download failed. Trying fallback URL...")
-        if _download_attempt(font_url_fallback, destination_path):
-            print("✅ 字型已透過備用連結成功下載 / Font successfully downloaded via fallback link.")
-            return True
-        else:
-            # Both attempts failed
-            return False
-
-# --- Main Script Logic for Font ---
-# Check if the font file already exists to avoid re-downloading.
-if not FONT_PATH.exists():
-    # If the font doesn't exist, call the download function.
-    if not download_font_with_fallback(FONT_NAME, FONT_PATH):
-        # If the download function returns False (meaning both URLs failed), exit the script.
-        raise SystemExit(
-            "\n❌ 字型下載失敗，主要來源與備用來源皆無法連線。\n"
-            "❌ Font download failed from both primary and fallback sources.\n"
-ax"   Please check your network connection or try running the script again later."
-        )
-
-if FONT_PATH.exists():
-    print(f"\n✅ 使用字型 / Using font: {FONT_PATH}")
-else:
-    # This case should be unreachable if the download fails due to the SystemExit above,
-    # but it serves as a final safeguard.
-    raise SystemExit(f"❌ 字型檔案不存在 / Font file not found at: {FONT_PATH}")
-
-# ==========================================
-# 3. 建立範例字幕檔 / Create Sample Subtitle File
-# ==========================================
-SUBTITLE_PATH = VIDEO_DIR / "subtitles.srt"
-srt_content = """1
-00:00:01,000 --> 00:00:04,000
-This is the first subtitle.
-這是第一個字幕。
-
-2
-00:00:05,000 --> 00:00:08,000
-This is the second subtitle,
-using the Noto Sans font.
-這是第二個字幕，
-使用思源黑體。
+Usage (local shell):
+    python whisper_subtitle_tool.py
 """
 
-with open(SUBTITLE_PATH, "w", encoding="utf-8") as f:
-    f.write(srt_content)
+import os
+import sys
+import json
+import subprocess
+import shlex
+from pathlib import Path
 
-print(f"\n✅ 範例字幕檔已建立 / Sample subtitle file created at: {SUBTITLE_PATH}")
+# ------------------------------------------
+# 0. Utility: environment & dependencies
+# ------------------------------------------
+def in_colab() -> bool:
+    """Detect if running inside Google Colab."""
+    try:
+        import google.colab  # type: ignore
+        return True
+    except Exception:
+        return False
 
-# ==========================================
-# 4. 建立範例影片 / Create Sample Video
-# ==========================================
-INPUT_VIDEO_PATH = VIDEO_DIR / "input.mp4"
-if not INPUT_VIDEO_PATH.exists():
-    print(f"\n⏳ 正在建立 10 秒的黑色範例影片 / Creating a 10-second black sample video...")
-    # This ffmpeg command creates a 10-second, 640x360, black video with silent audio.
-    ffmpeg_create_video_cmd = [
-        'ffmpeg',
-        '-f', 'lavfi',                 # Input format: libavfilter
-        '-i', 'color=c=black:s=640x360:r=30:d=10', # Input source: a black color pattern
-        '-f', 'lavfi',                 # Another input format for silent audio
-        '-i', 'anullsrc=r=44100:cl=stereo', # Input source: silent audio
-        '-c:v', 'libx264',             # Video codec: H.264
-        '-c:a', 'aac',                 # Audio codec: AAC
-        '-t', '10',                    # Duration: 10 seconds
-        '-pix_fmt', 'yuv420p',         # Pixel format for compatibility
-        '-y',                          # Overwrite output file if it exists
-        str(INPUT_VIDEO_PATH)
+
+def run_cmd(cmd, check=True, capture_output=True, text=True):
+    """Helper to run subprocess commands with basic error handling."""
+    return subprocess.run(cmd, check=check, capture_output=capture_output, text=text)
+
+
+def ensure_pip_package(pkg_spec: str):
+    """
+    Install a Python package with pip if it's not available.
+    pkg_spec can be 'whisper' or 'git+https://github.com/openai/whisper.git', etc.
+    """
+    try:
+        # Try importing by module name, if it looks like that
+        if "git+" not in pkg_spec and "==" in pkg_spec:
+            mod_name = pkg_spec.split("==", 1)[0]
+        elif "git+" not in pkg_spec and "[" not in pkg_spec and "<" not in pkg_spec and ">" not in pkg_spec:
+            mod_name = pkg_spec
+        else:
+            mod_name = None
+
+        if mod_name:
+            __import__(mod_name)
+            return
+    except ImportError:
+        pass
+
+    print(f"Installing pip package: {pkg_spec} ...")
+    cmd = [sys.executable, "-m", "pip", "install", "-q", pkg_spec]
+    run_cmd(cmd, check=True, capture_output=False, text=False)
+    print(f"Installed: {pkg_spec}")
+
+
+def ensure_dependencies():
+    """Install or import all necessary dependencies."""
+    # Whisper from GitHub (same as your cell)
+    ensure_pip_package("git+https://github.com/openai/whisper.git")
+    # googletrans
+    ensure_pip_package("googletrans==4.0.0-rc1")
+
+    # Now import them
+    global torch, whisper, Translator
+    import torch  # type: ignore
+    import whisper  # type: ignore
+    from googletrans import Translator  # type: ignore
+
+
+# ------------------------------------------
+# 1. Prepare directories
+# ------------------------------------------
+def prepare_directories():
+    cwd = Path(".").resolve()
+    upload_dir = cwd / "uploads"
+    out_dir = cwd / "transcripts"
+    font_dir = cwd / "fonts"
+    for d in (upload_dir, out_dir, font_dir):
+        d.mkdir(exist_ok=True)
+    print("工作目錄 / Working dir:", cwd)
+    return cwd, upload_dir, out_dir, font_dir
+
+
+# ------------------------------------------
+# 2. Download font (Noto Sans CJK)
+# ------------------------------------------
+def ensure_font(font_dir: Path) -> Path:
+    """
+    Download a suitable Noto Sans font for CJK if not present.
+    We keep the filename NotoSansCJK-Regular.ttc for compatibility
+    but the URL points to NotoSansSC-Regular.otf as in your code.
+    """
+    font_path = font_dir / "NotoSansCJK-Regular.ttc"
+
+    if not font_path.exists():
+        print("下載字型 Noto Sans CJK ... / Downloading Noto Sans CJK ...")
+        # Download using Python instead of shell wget
+        import urllib.request
+
+        url = (
+            "https://github.com/google/fonts/raw/main/ofl/notosanssc/"
+            "NotoSansSC-Regular.otf"
+        )
+        tmp_font = font_dir / "NotoSansSC-Regular.otf"
+        try:
+            urllib.request.urlretrieve(url, str(tmp_font))
+            # Keep the filename that ffmpeg expects in the rest of the code
+            tmp_font.rename(font_path)
+        except Exception as e:
+            raise SystemExit(
+                f"字型下載失敗 / Font download failed: {e}\n"
+                "請確認網路連線後再試。"
+            )
+
+    if not font_path.exists():
+        raise SystemExit(
+            "字型下載失敗，請再試一次。/ Font download failed, please retry."
+        )
+
+    print("使用字型 / Using font:", font_path)
+    return font_path
+
+
+# ------------------------------------------
+# 3. Get video file (Colab upload or local path)
+# ------------------------------------------
+def get_video_file(upload_dir: Path) -> Path:
+    if in_colab():
+        # Colab: use upload widget
+        from google.colab import files  # type: ignore
+
+        print("\n請上傳要處理的影片檔（mp4, mkv, mov 等） / "
+              "Please upload the video file (mp4, mkv, mov, etc.)")
+        uploaded = files.upload()
+        if not uploaded:
+            raise SystemExit("未上傳任何檔案 / No file uploaded.")
+
+        up_name = list(uploaded.keys())[0]
+        tmp_path = Path(up_name)
+        video_path = upload_dir / up_name
+        if tmp_path.exists():
+            tmp_path.rename(video_path)
+    else:
+        # Non-Colab: ask user for a path
+        print("\n請輸入要處理的影片檔路徑（mp4, mkv, mov 等） / "
+              "Please enter the video file path (mp4, mkv, mov, etc.)")
+        path_str = input("影片檔路徑 / Video path: ").strip()
+        if not path_str:
+            raise SystemExit("未提供路徑 / No path provided.")
+        src = Path(path_str).expanduser().resolve()
+        if not src.exists():
+            raise SystemExit(f"找不到影片檔 / Video not found: {src}")
+        # Copy or use directly
+        video_path = upload_dir / src.name
+        if src != video_path:
+            import shutil
+            shutil.copy2(src, video_path)
+
+    if not video_path.exists():
+        raise SystemExit(
+            "影片檔不存在，請重試上傳或檢查路徑。/ "
+            "Video file does not exist; please re-upload or check path."
+        )
+
+    print("影片路徑 / Video path:", video_path)
+    return video_path
+
+
+# ------------------------------------------
+# 4. Load Whisper model
+# ------------------------------------------
+def load_whisper_model():
+    print("\n選擇 Whisper 模型大小 (tiny / base / small / medium / large)")
+    model_name = input("模型大小 [預設 small]: ").strip() or "small"
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"載入 Whisper 模型 {model_name} 在 {device} / "
+          f"Loading model {model_name} on {device} ...")
+    model = whisper.load_model(model_name, device=device)
+    print("模型已載入 / Model loaded.\n")
+    return model
+
+
+# ------------------------------------------
+# 5. Extract audio with ffmpeg
+# ------------------------------------------
+def extract_audio(video_path: Path, upload_dir: Path) -> Path:
+    audio_path = upload_dir / f"{video_path.stem}.m4a"
+    if not audio_path.exists():
+        print("從影片抽取音訊 ... / Extracting audio from video ...")
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(video_path),
+            "-vn",
+            "-acodec", "aac",
+            "-b:a", "192k",
+            str(audio_path),
+        ]
+        try:
+            run_cmd(cmd, check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as e:
+            print("ffmpeg error (audio extraction):")
+            print(e.stderr)
+            raise SystemExit("抽取音訊失敗 / Failed to extract audio.")
+
+    if not audio_path.exists():
+        raise SystemExit("抽取音訊失敗 / Failed to extract audio.")
+
+    print("音訊檔案 / Audio file:", audio_path)
+
+    # In Colab you can optionally play it, but script will continue either way
+    if in_colab():
+        try:
+            from IPython.display import Audio, display  # type: ignore
+            display(Audio(filename=str(audio_path)))
+        except Exception:
+            pass
+
+    return audio_path
+
+
+# ------------------------------------------
+# 6. Whisper transcription
+# ------------------------------------------
+def transcribe_audio(model, audio_path: Path):
+    print("\n使用 Whisper 轉錄（自動偵測語言） / "
+          "Transcribing with auto language detection ...")
+    result = model.transcribe(str(audio_path), task="transcribe", verbose=False)
+
+    language = result.get("language", "unknown")
+    segments = result.get("segments", [])
+    full_text = result.get("text", "")
+
+    print("偵測語言 / Detected language:", language)
+    print("\n原文前 300 字 / First 300 chars of source:")
+    preview = full_text[:300] + ("..." if len(full_text) > 300 else "")
+    print(preview)
+
+    if not segments:
+        raise SystemExit("Whisper 沒有產生任何段落 / No segments from Whisper.")
+
+    return language, segments, full_text
+
+
+# ------------------------------------------
+# 7 & 8. Choose target language & translate segments
+# ------------------------------------------
+def translate_segments(segments, default_lang="en"):
+    print("\n選擇翻譯語言代碼（en, zh-TW, zh-CN, ja, fr, es, de ...）")
+    target_lang = input(f"翻譯目標語言 [預設 {default_lang}]: ").strip() or default_lang
+    print("翻譯字幕語言 / Subtitle language:", target_lang)
+
+    print("\n開始翻譯字幕 ... / Translating segments ...")
+
+    translator = Translator()
+    translated_segments = []
+
+    for seg in segments:
+        orig = seg.get("text", "").strip()
+        if not orig:
+            t_txt = ""
+        else:
+            try:
+                t = translator.translate(orig, dest=target_lang)
+                t_txt = t.text
+            except Exception as e:
+                print("翻譯失敗，改用原文 / Translation failed, using original:", e)
+                t_txt = orig
+
+        ns = dict(seg)
+        ns["translated_text"] = t_txt
+        translated_segments.append(ns)
+
+    full_translated_text = "\n".join(s["translated_text"] for s in translated_segments)
+
+    print("\n翻譯前 300 字 / First 300 chars of translation:")
+    preview = full_translated_text[:300] + ("..." if len(full_translated_text) > 300 else "")
+    print(preview)
+
+    return target_lang, translated_segments, full_translated_text
+
+
+# ------------------------------------------
+# 9. Save transcripts
+# ------------------------------------------
+def save_transcripts(
+    video_path: Path,
+    out_dir: Path,
+    full_text: str,
+    full_translated_text: str,
+    target_lang: str,
+):
+    base = video_path.stem
+    txt_orig = out_dir / f"{base}_original.txt"
+    txt_tr = out_dir / f"{base}_translated_{target_lang}.txt"
+
+    txt_orig.write_text(full_text, encoding="utf-8")
+    txt_tr.write_text(full_translated_text, encoding="utf-8")
+
+    print("\n文字稿已儲存 / Transcripts saved:")
+    print("  ", txt_orig)
+    print("  ", txt_tr)
+
+    return txt_orig, txt_tr
+
+
+# ------------------------------------------
+# 10. Build ffmpeg drawtext filter_complex
+# ------------------------------------------
+def build_drawtext_filter(
+    video_path: Path,
+    translated_segments,
+    font_path: Path,
+):
+    print("\n建立 drawtext 濾鏡字串 ... / Building drawtext filter string ...")
+
+    # Probe video resolution
+    probe_cmd = [
+        "ffprobe", "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=width,height",
+        "-of", "json",
+        str(video_path),
     ]
     try:
-        subprocess.run(ffmpeg_create_video_cmd, check=True, capture_output=True, text=True)
-        print(f"✅ 範例影片已建立 / Sample video created at: {INPUT_VIDEO_PATH}")
+        probe = run_cmd(probe_cmd, capture_output=True, text=True)
     except subprocess.CalledProcessError as e:
-        print(f"❌ 建立範例影片失敗 / Failed to create sample video.")
-        print(f"   ffmpeg stdout: {e.stdout}")
-        print(f"   ffmpeg stderr: {e.stderr}")
-        raise
-else:
-    print(f"\n✅ 範例影片已存在 / Sample video already exists at: {INPUT_VIDEO_PATH}")
+        print("ffprobe error:")
+        print(e.stderr)
+        raise SystemExit("無法讀取影片解析度 / Failed to get video resolution.")
 
-# ==========================================
-# 5. 將字幕嵌入影片 / Burn Subtitles into Video
-# ==========================================
-OUTPUT_VIDEO_PATH = OUTPUT_DIR / "output_with_subtitles.mp4"
-print(f"\n⏳ 正在將字幕嵌入影片... / Burning subtitles into video...")
+    info = json.loads(probe.stdout)
+    vw = info["streams"][0]["width"]
+    vh = info["streams"][0]["height"]
+    font_size = max(24, int(vh * 0.05))  # Slightly larger for readability
 
-# The font name 'Noto Sans SC' is the internal name of the font.
-# We must also tell ffmpeg where to find the font files using the `fontsdir` option.
-# The `force_style` parameter applies the font for rendering the subtitles.
-ffmpeg_burn_subtitles_cmd = [
-    'ffmpeg',
-    '-i', str(INPUT_VIDEO_PATH),
-    '-vf', f"subtitles={SUBTITLE_PATH.as_posix()}:fontsdir={FONT_DIR.as_posix()}:force_style='FontName=Noto Sans SC'",
-    '-c:v', 'libx264',
-    '-c:a', 'copy',
-    '-y',
-    str(OUTPUT_VIDEO_PATH)
-]
+    print(f"影片解析度 / Video resolution: {vw}x{vh}, 字體大小 / font size: {font_size}")
 
-# Explanation of the ffmpeg command:
-# -i {input_video}: Specifies the input video file.
-# -vf "subtitles=...": Applies a video filter ('vf').
-#   - subtitles={subtitle_file}: The name of the filter and the path to the .srt file.
-#     - Using .as_posix() ensures forward slashes, which is safer for ffmpeg.
-#   - fontsdir={font_directory}: Tells ffmpeg which directory to scan for fonts.
-#   - force_style='FontName=Noto Sans SC': Forces the use of the specified font for rendering.
-#     'Noto Sans SC' is the name defined inside the .otf font file.
-# -c:a copy: Copies the audio stream without re-encoding, which is much faster.
-# -y: Overwrites the output file if it exists.
+    fontfile_str = str(font_path)
 
-try:
-    print("   Executing ffmpeg command:")
-    print(f"   {' '.join(ffmpeg_burn_subtitles_cmd)}")
-    # Using capture_output=True will hide ffmpeg's progress, but is useful for debugging.
-    # If you want to see ffmpeg's progress in real-time, remove `capture_output`.
-    subprocess.run(ffmpeg_burn_subtitles_cmd, check=True, capture_output=True, text=True)
-    print("\n✅ 字幕嵌入成功！/ Subtitles burned successfully!")
-    print(f"✅ 最終影片儲存於 / Final video saved at: {OUTPUT_VIDEO_PATH}")
-except subprocess.CalledProcessError as e:
-    print("\n❌ 字幕嵌入失敗 / Failed to burn subtitles.")
-    print("   Please ensure ffmpeg is installed and the font was downloaded correctly.")
-    print(f"   ffmpeg stdout:\n{e.stdout}")
-    print(f"   ffmpeg stderr:\n{e.stderr}")
-    raise
+    filter_parts = []
+    input_label = "[0:v]"
+    idx = 0
 
-# ==========================================
-# 6. 完成 / Finished
-# ==========================================
-print("\n🎉 Script finished successfully.")
+    for seg in translated_segments:
+        txt = seg.get("translated_text", "").strip()
+        if not txt:
+            continue
+
+        start = float(seg.get("start", 0.0))
+        end = float(seg.get("end", start + 1.0))
+        end = end + 0.05  # small buffer
+
+        # Escape text for ffmpeg drawtext
+        safe_text = (
+            txt.replace("\\", "\\\\")
+               .replace("'", "’")
+               .replace(":", "\\:")
+               .replace(",", "\\,")
+               .replace("%", "%%")
+        )
+
+        output_label = f"[v{idx+1}]"
+
+        draw = (
+            f"{input_label}drawtext=fontfile='{fontfile_str}':"
+            f"text='{safe_text}':"
+            f"fontsize={font_size}:"
+            f"fontcolor=white:bordercolor=black:borderw=2:"
+            f"x=(w-text_w)/2:y=h-1.5*text_h:"
+            f"enable='between(t,{start},{end})'{output_label}"
+        )
+
+        filter_parts.append(draw)
+        input_label = output_label
+        idx += 1
+
+    if idx == 0:
+        raise SystemExit("沒有任何字幕內容可以畫 / No subtitle lines to render.")
+
+    vf_filter = "; ".join(filter_parts)
+    output_label = input_label
+
+    print("\n濾鏡字串前 1000 字 / Filter string first 1000 chars:")
+    preview = vf_filter[:1000] + ("..." if len(vf_filter) > 1000 else "")
+    print(preview)
+
+    return vf_filter, output_label
+
+
+# ------------------------------------------
+# 11. Run ffmpeg to burn subtitles
+# ------------------------------------------
+def burn_subtitles(
+    video_path: Path,
+    out_dir: Path,
+    vf_filter: str,
+    output_label: str,
+    target_lang: str,
+):
+    base = video_path.stem
+    out_mp4 = out_dir / f"{base}_sub_{target_lang}_drawtext.mp4"
+
+    cmd_burn = [
+        "ffmpeg", "-y",
+        "-i", str(video_path),
+        "-filter_complex", vf_filter,
+        "-map", output_label,     # last video label
+        "-map", "0:a?",           # original audio if exists
+        "-c:v", "libx264",
+        "-preset", "fast",
+        "-crf", "22",
+        "-c:a", "copy",
+        str(out_mp4),
+    ]
+
+    print("\n執行 ffmpeg 硬燒字幕 / Running ffmpeg to burn subtitles ...")
+    print("Command (shell escaped):")
+    print(" ", " ".join(shlex.quote(c) for c in cmd_burn))
+    print("\n=== ffmpeg output ===\n")
+
+    proc = run_cmd(cmd_burn, check=False, capture_output=True, text=True)
+
+    if proc.returncode == 0:
+        print(proc.stderr)
+        print("\n✅ 成功產生含字幕影片 / Subtitled video created:")
+        print("  ", out_mp4)
+        if in_colab():
+            print("\n請在左側 Files 面板展開 transcripts/，下載該 mp4。")
+    else:
+        print("=== ffmpeg stdout ===")
+        print(proc.stdout)
+        print("\n=== ffmpeg stderr ===")
+        print(proc.stderr)
+        print("ffmpeg return code:", proc.returncode)
+        print("\n❌ 產生含字幕影片失敗 / Failed to create subtitled video.")
+        print("請把上面 ffmpeg 輸出全部貼給我，我幫你看錯誤原因。")
+
+    return out_mp4 if proc.returncode == 0 else None
+
+
+# ------------------------------------------
+# Main
+# ------------------------------------------
+def main():
+    ensure_dependencies()
+
+    global torch, whisper, Translator  # imported in ensure_dependencies
+
+    cwd, upload_dir, out_dir, font_dir = prepare_directories()
+    font_path = ensure_font(font_dir)
+
+    video_path = get_video_file(upload_dir)
+
+    model = load_whisper_model()
+
+    audio_path = extract_audio(video_path, upload_dir)
+
+    language, segments, full_text = transcribe_audio(model, audio_path)
+
+    target_lang, translated_segments, full_translated_text = translate_segments(
+        segments
+    )
+
+    save_transcripts(
+        video_path,
+        out_dir,
+        full_text,
+        full_translated_text,
+        target_lang,
+    )
+
+    vf_filter, output_label = build_drawtext_filter(
+        video_path, translated_segments, font_path
+    )
+
+    burn_subtitles(
+        video_path,
+        out_dir,
+        vf_filter,
+        output_label,
+        target_lang,
+    )
+
+
+if __name__ == "__main__":
+    main()
