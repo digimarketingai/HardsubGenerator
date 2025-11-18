@@ -2,25 +2,21 @@
 # -*- coding: utf-8 -*-
 
 """
-whisper_subtitle_tool.py
+whisper_gradio_tool.py
 
-Transcribe a video with OpenAI Whisper, translate subtitles with googletrans,
-and burn translated subtitles into the video using ffmpeg drawtext.
+Gradio-based UI for:
+1. Uploading a video (mp4, mkv, mov, etc.)
+2. Transcribing with OpenAI Whisper
+3. Translating subtitles with googletrans
+4. Burning translated subtitles into the video with ffmpeg drawtext
+5. Returning:
+   - Subtitled MP4
+   - Original transcript .txt
+   - Translated transcript .txt
+   - Log text output
 
-Usage in Colab (with upload widget):
-
-    %run whisper_subtitle_tool.py
-    # or
-    import whisper_subtitle_tool
-    whisper_subtitle_tool.main()
-
-Usage in Colab (without widget, manual path):
-
-    !python whisper_subtitle_tool.py
-
-Usage locally:
-
-    python whisper_subtitle_tool.py
+Run (e.g. in Colab):
+    !python whisper_gradio_tool.py
 """
 
 import sys
@@ -28,11 +24,13 @@ import json
 import subprocess
 import shlex
 from pathlib import Path
+from datetime import datetime
+import tempfile
+import shutil
 
-
-# ------------------------------------------
-# 0. Utility: dependencies & subprocess
-# ------------------------------------------
+# ----------------------------
+# 0. Dependencies & utilities
+# ----------------------------
 def run_cmd(cmd, check=True, capture_output=True, text=True):
     """Helper to run subprocess commands with basic error handling."""
     return subprocess.run(cmd, check=check, capture_output=capture_output, text=text)
@@ -67,30 +65,32 @@ def ensure_dependencies():
     """Install or import all necessary dependencies."""
     ensure_pip_package("git+https://github.com/openai/whisper.git")
     ensure_pip_package("googletrans==4.0.0-rc1")
+    ensure_pip_package("gradio==4.44.0")  # version can be adjusted
 
-    global torch, whisper, Translator
+    global torch, whisper, Translator, gr
     import torch  # type: ignore
     import whisper  # type: ignore
     from googletrans import Translator  # type: ignore
+    import gradio as gr  # type: ignore
 
 
-# ------------------------------------------
+# ----------------------------
 # 1. Prepare directories
-# ------------------------------------------
-def prepare_directories():
-    cwd = Path(".").resolve()
-    upload_dir = cwd / "uploads"
-    out_dir = cwd / "transcripts"
-    font_dir = cwd / "fonts"
-    for d in (upload_dir, out_dir, font_dir):
-        d.mkdir(exist_ok=True)
-    print("工作目錄 / Working dir:", cwd)
-    return cwd, upload_dir, out_dir, font_dir
+# ----------------------------
+BASE_DIR = Path(".").resolve()
+UPLOAD_DIR = BASE_DIR / "uploads"
+OUT_DIR = BASE_DIR / "transcripts"
+FONT_DIR = BASE_DIR / "fonts"
+
+for d in (UPLOAD_DIR, OUT_DIR, FONT_DIR):
+    d.mkdir(exist_ok=True)
+
+print("工作目錄 / Working dir:", BASE_DIR)
 
 
-# ------------------------------------------
-# 2. Download & install font (auto, from your URL)
-# ------------------------------------------
+# ----------------------------
+# 2. Font download / setup
+# ----------------------------
 def ensure_font(font_dir: Path) -> Path:
     """
     Automatically download NotoSansCJK-Regular.ttc from the given ZIP URL
@@ -141,95 +141,65 @@ def ensure_font(font_dir: Path) -> Path:
     return font_path
 
 
-# ------------------------------------------
-# 3. Get video file (Colab upload if possible, else manual path)
-# ------------------------------------------
-def get_video_file(upload_dir: Path) -> Path:
+FONT_PATH = ensure_font(FONT_DIR)
+
+
+# ----------------------------
+# 3. Core processing function
+# ----------------------------
+def process_video(
+    video_file,
+    model_name="small",
+    target_lang="en",
+):
     """
-    Try to use google.colab.files.upload() if running inside a Colab
-    notebook kernel. If that fails (e.g., when called via `!python`),
-    fall back to asking for a file path.
+    Gradio callback:
+    - video_file: temp file object from Gradio
+    - model_name: Whisper model size
+    - target_lang: translation target language (e.g. 'en', 'zh-TW', etc.)
+
+    Returns:
+        (subtitled_video, original_txt, translated_txt, log_text)
     """
-    # Try Colab upload widget
-    try:
-        from google.colab import files  # type: ignore
-        from IPython import get_ipython  # type: ignore
+    logs = []
+    def log(*args):
+        msg = " ".join(str(a) for a in args)
+        print(msg)
+        logs.append(msg)
 
-        ip = get_ipython()
-        if ip is not None and hasattr(ip, "kernel"):
-            print(
-                "\n請上傳要處理的影片檔（mp4, mkv, mov 等） / "
-                "Please upload the video file (mp4, mkv, mov, etc.)"
-            )
-            uploaded = files.upload()
-            if not uploaded:
-                raise SystemExit("未上傳任何檔案 / No file uploaded.")
+    if video_file is None:
+        return None, None, None, "請先上傳影片 / Please upload a video first."
 
-            up_name = list(uploaded.keys())[0]
-            tmp_path = Path(up_name)
-            video_path = upload_dir / up_name
-            if tmp_path.exists():
-                tmp_path.rename(video_path)
+    # Ensure dependencies imported (once)
+    ensure_dependencies()
+    global torch, whisper, Translator, gr  # imported above
 
-            print("影片路徑 / Video path:", video_path)
-            return video_path
-        else:
-            # Not in a real IPython kernel (e.g. `!python`), will go to except below
-            raise RuntimeError("Not in main Colab kernel.")
-    except Exception:
-        # Fallback: ask for path
-        print(
-            "\n⚠ 無法使用 Colab 上傳介面（可能是從 `!python` 執行）。\n"
-            "Please enter the full path to the video file.\n"
-            "In Colab, upload the file via the left 'Files' panel\n"
-            "and then enter its path here (e.g. /content/myvideo.mp4).\n"
-        )
-        path_str = input("影片檔路徑 / Video path: ").strip()
-        if not path_str:
-            raise SystemExit("未提供路徑 / No path provided.")
+    # Save uploaded file to UPLOAD_DIR with a sane name
+    # video_file is a tempfile path-like object (Gradio)
+    temp_src = Path(video_file.name)
+    # Build a new unique filename
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ext = temp_src.suffix or ".mp4"
+    base_name = f"upload_{timestamp}{ext}"
+    dst = UPLOAD_DIR / base_name
+    shutil.copy2(temp_src, dst)
 
-        src = Path(path_str).expanduser().resolve()
-        if not src.exists():
-            raise SystemExit(f"找不到影片檔 / Video not found: {src}")
+    video_path = dst
+    log("影片已儲存 / Video saved:", video_path)
 
-        # Copy into uploads/ for consistent handling
-        video_path = upload_dir / src.name
-        if src != video_path:
-            import shutil
-            shutil.copy2(src, video_path)
-
-        if not video_path.exists():
-            raise SystemExit(
-                "影片檔不存在，請重試上傳或檢查路徑。/ "
-                "Video file does not exist; please re-upload or check path."
-            )
-
-        print("影片路徑 / Video path (copied to uploads/):", video_path)
-        return video_path
-
-
-# ------------------------------------------
-# 4. Load Whisper model
-# ------------------------------------------
-def load_whisper_model():
-    print("\n選擇 Whisper 模型大小 (tiny / base / small / medium / large)")
-    model_name = input("模型大小 [預設 small]: ").strip() or "small"
-
+    # 3.1 Load Whisper model
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"載入 Whisper 模型 {model_name} 在 {device} / "
-          f"Loading model {model_name} on {device} ...")
-    model = whisper.load_model(model_name, device=device)
-    print("模型已載入 / Model loaded.\n")
-    return model
+    log(f"載入 Whisper 模型 {model_name} 在 {device} / Loading model on {device} ...")
+    try:
+        model = whisper.load_model(model_name, device=device)
+    except Exception as e:
+        log("載入模型失敗 / Failed to load model:", e)
+        return None, None, None, "\n".join(logs)
 
-
-# ------------------------------------------
-# 5. Extract audio with ffmpeg
-# ------------------------------------------
-def extract_audio(video_path: Path, upload_dir: Path) -> Path:
-    audio_path = upload_dir / f"{video_path.stem}.m4a"
+    # 3.2 Extract audio with ffmpeg
+    audio_path = UPLOAD_DIR / f"{video_path.stem}.m4a"
     if not audio_path.exists():
-        print("從影片抽取音訊 ... / Extracting audio from video ...")
+        log("從影片抽取音訊 ... / Extracting audio from video ...")
         cmd = [
             "ffmpeg", "-y",
             "-i", str(video_path),
@@ -239,55 +209,48 @@ def extract_audio(video_path: Path, upload_dir: Path) -> Path:
             str(audio_path),
         ]
         try:
-            run_cmd(cmd, check=True, capture_output=True, text=True)
+            proc = run_cmd(cmd, check=True, capture_output=True, text=True)
+            log(proc.stderr)
         except subprocess.CalledProcessError as e:
-            print("ffmpeg error (audio extraction):")
-            print(e.stderr)
-            raise SystemExit("抽取音訊失敗 / Failed to extract audio.")
+            log("ffmpeg error (audio extraction):")
+            log(e.stderr)
+            return None, None, None, "\n".join(logs)
 
     if not audio_path.exists():
-        raise SystemExit("抽取音訊失敗 / Failed to extract audio.")
+        log("抽取音訊失敗 / Failed to extract audio.")
+        return None, None, None, "\n".join(logs)
 
-    print("音訊檔案 / Audio file:", audio_path)
-    return audio_path
+    log("音訊檔案 / Audio file:", audio_path)
 
-
-# ------------------------------------------
-# 6. Whisper transcription
-# ------------------------------------------
-def transcribe_audio(model, audio_path: Path):
-    print("\n使用 Whisper 轉錄（自動偵測語言） / "
-          "Transcribing with auto language detection ...")
-    result = model.transcribe(str(audio_path), task="transcribe", verbose=False)
+    # 3.3 Transcribe with Whisper
+    log("使用 Whisper 轉錄（自動偵測語言） / Transcribing with auto language detection ...")
+    try:
+        result = model.transcribe(str(audio_path), task="transcribe", verbose=False)
+    except Exception as e:
+        log("Whisper 轉錄失敗 / Transcription failed:", e)
+        return None, None, None, "\n".join(logs)
 
     language = result.get("language", "unknown")
     segments = result.get("segments", [])
     full_text = result.get("text", "")
 
-    print("偵測語言 / Detected language:", language)
-    print("\n原文前 300 字 / First 300 chars of source:")
-    preview = full_text[:300] + ("..." if len(full_text) > 300 else "")
-    print(preview)
+    log("偵測語言 / Detected language:", language)
+    preview_src = full_text[:300] + ("..." if len(full_text) > 300 else "")
+    log("原文前 300 字 / First 300 chars of source:")
+    log(preview_src)
 
     if not segments:
-        raise SystemExit("Whisper 沒有產生任何段落 / No segments from Whisper.")
+        log("Whisper 沒有產生任何段落 / No segments from Whisper.")
+        return None, None, None, "\n".join(logs)
 
-    return language, segments, full_text
-
-
-# ------------------------------------------
-# 7 & 8. Choose target language & translate segments
-# ------------------------------------------
-def translate_segments(segments, default_lang="en"):
-    print("\n選擇翻譯語言代碼（en, zh-TW, zh-CN, ja, fr, es, de ...）")
-    target_lang = input(f"翻譯目標語言 [預設 {default_lang}]: ").strip() or default_lang
-    print("翻譯字幕語言 / Subtitle language:", target_lang)
-
-    print("\n開始翻譯字幕 ... / Translating segments ...")
+    # 3.4 Translate segments
+    target_lang = target_lang.strip() or "en"
+    log("翻譯字幕語言 / Subtitle language:", target_lang)
 
     translator = Translator()
     translated_segments = []
 
+    log("開始翻譯字幕 ... / Translating segments ...")
     for seg in segments:
         orig = seg.get("text", "").strip()
         if not orig:
@@ -297,7 +260,7 @@ def translate_segments(segments, default_lang="en"):
                 t = translator.translate(orig, dest=target_lang)
                 t_txt = t.text
             except Exception as e:
-                print("翻譯失敗，改用原文 / Translation failed, using original:", e)
+                log("翻譯失敗，改用原文 / Translation failed, using original:", e)
                 t_txt = orig
 
         ns = dict(seg)
@@ -305,47 +268,24 @@ def translate_segments(segments, default_lang="en"):
         translated_segments.append(ns)
 
     full_translated_text = "\n".join(s["translated_text"] for s in translated_segments)
+    preview_tr = full_translated_text[:300] + ("..." if len(full_translated_text) > 300 else "")
+    log("翻譯前 300 字 / First 300 chars of translation:")
+    log(preview_tr)
 
-    print("\n翻譯前 300 字 / First 300 chars of translation:")
-    preview = full_translated_text[:300] + ("..." if len(full_translated_text) > 300 else "")
-    print(preview)
-
-    return target_lang, translated_segments, full_translated_text
-
-
-# ------------------------------------------
-# 9. Save transcripts
-# ------------------------------------------
-def save_transcripts(
-    video_path: Path,
-    out_dir: Path,
-    full_text: str,
-    full_translated_text: str,
-    target_lang: str,
-):
+    # 3.5 Save transcripts
     base = video_path.stem
-    txt_orig = out_dir / f"{base}_original.txt"
-    txt_tr = out_dir / f"{base}_translated_{target_lang}.txt"
+    txt_orig = OUT_DIR / f"{base}_original.txt"
+    txt_tr = OUT_DIR / f"{base}_translated_{target_lang}.txt"
 
     txt_orig.write_text(full_text, encoding="utf-8")
     txt_tr.write_text(full_translated_text, encoding="utf-8")
 
-    print("\n文字稿已儲存 / Transcripts saved:")
-    print("  ", txt_orig)
-    print("  ", txt_tr)
+    log("文字稿已儲存 / Transcripts saved:")
+    log("  ", txt_orig)
+    log("  ", txt_tr)
 
-    return txt_orig, txt_tr
-
-
-# ------------------------------------------
-# 10. Build ffmpeg drawtext filter_complex
-# ------------------------------------------
-def build_drawtext_filter(
-    video_path: Path,
-    translated_segments,
-    font_path: Path,
-):
-    print("\n建立 drawtext 濾鏡字串 ... / Building drawtext filter string ...")
+    # 3.6 Build drawtext filter
+    log("建立 drawtext 濾鏡字串 ... / Building drawtext filter string ...")
 
     probe_cmd = [
         "ffprobe", "-v", "error",
@@ -357,18 +297,18 @@ def build_drawtext_filter(
     try:
         probe = run_cmd(probe_cmd, capture_output=True, text=True)
     except subprocess.CalledProcessError as e:
-        print("ffprobe error:")
-        print(e.stderr)
-        raise SystemExit("無法讀取影片解析度 / Failed to get video resolution.")
+        log("ffprobe error:")
+        log(e.stderr)
+        return None, str(txt_orig), str(txt_tr), "\n".join(logs)
 
     info = json.loads(probe.stdout)
     vw = info["streams"][0]["width"]
     vh = info["streams"][0]["height"]
     font_size = max(24, int(vh * 0.05))  # Slightly larger for readability
 
-    print(f"影片解析度 / Video resolution: {vw}x{vh}, 字體大小 / font size: {font_size}")
+    log(f"影片解析度 / Video resolution: {vw}x{vh}, 字體大小 / font size: {font_size}")
 
-    fontfile_str = str(font_path)
+    fontfile_str = str(FONT_PATH)
 
     filter_parts = []
     input_label = "[0:v]"
@@ -407,30 +347,18 @@ def build_drawtext_filter(
         idx += 1
 
     if idx == 0:
-        raise SystemExit("沒有任何字幕內容可以畫 / No subtitle lines to render.")
+        log("沒有任何字幕內容可以畫 / No subtitle lines to render.")
+        return None, str(txt_orig), str(txt_tr), "\n".join(logs)
 
     vf_filter = "; ".join(filter_parts)
     output_label = input_label
 
-    print("\n濾鏡字串前 1000 字 / Filter string first 1000 chars:")
-    preview = vf_filter[:1000] + ("..." if len(vf_filter) > 1000 else "")
-    print(preview)
+    log("濾鏡字串前 600 字 / Filter string first 600 chars:")
+    preview_filter = vf_filter[:600] + ("..." if len(vf_filter) > 600 else "")
+    log(preview_filter)
 
-    return vf_filter, output_label
-
-
-# ------------------------------------------
-# 11. Run ffmpeg to burn subtitles
-# ------------------------------------------
-def burn_subtitles(
-    video_path: Path,
-    out_dir: Path,
-    vf_filter: str,
-    output_label: str,
-    target_lang: str,
-):
-    base = video_path.stem
-    out_mp4 = out_dir / f"{base}_sub_{target_lang}_drawtext.mp4"
+    # 3.7 ffmpeg burn subtitles
+    out_mp4 = OUT_DIR / f"{base}_sub_{target_lang}_drawtext.mp4"
 
     cmd_burn = [
         "ffmpeg", "-y",
@@ -445,73 +373,105 @@ def burn_subtitles(
         str(out_mp4),
     ]
 
-    print("\n執行 ffmpeg 硬燒字幕 / Running ffmpeg to burn subtitles ...")
-    print("Command (shell escaped):")
-    print(" ", " ".join(shlex.quote(c) for c in cmd_burn))
-    print("\n=== ffmpeg output ===\n")
+    log("執行 ffmpeg 硬燒字幕 / Running ffmpeg to burn subtitles ...")
+    log("Command (shell escaped):")
+    log(" ".join(shlex.quote(c) for c in cmd_burn))
+    log("=== ffmpeg output ===")
 
     proc = run_cmd(cmd_burn, check=False, capture_output=True, text=True)
 
     if proc.returncode == 0:
-        print(proc.stderr)
-        print("\n✅ 成功產生含字幕影片 / Subtitled video created:")
-        print("  ", out_mp4)
-        print("\n請在左側 Files 面板展開 transcripts/，下載該 mp4。")
+        log(proc.stderr)
+        log("✅ 成功產生含字幕影片 / Subtitled video created:")
+        log("  ", out_mp4)
+        subtitled_video = str(out_mp4)
     else:
-        print("=== ffmpeg stdout ===")
-        print(proc.stdout)
-        print("\n=== ffmpeg stderr ===")
-        print(proc.stderr)
-        print("ffmpeg return code:", proc.returncode)
-        print("\n❌ 產生含字幕影片失敗 / Failed to create subtitled video.")
-        print("請把上面 ffmpeg 輸出全部貼給我，我幫你看錯誤原因。")
+        log("=== ffmpeg stdout ===")
+        log(proc.stdout)
+        log("=== ffmpeg stderr ===")
+        log(proc.stderr)
+        log("ffmpeg return code:", proc.returncode)
+        log("❌ 產生含字幕影片失敗 / Failed to create subtitled video.")
+        subtitled_video = None
 
-    return out_mp4 if proc.returncode == 0 else None
+    # Gradio expects actual file paths or file-like objects
+    return (
+        subtitled_video,
+        str(txt_orig),
+        str(txt_tr),
+        "\n".join(logs),
+    )
 
 
-# ------------------------------------------
-# Main
-# ------------------------------------------
-def main():
+# ----------------------------
+# 4. Gradio interface
+# ----------------------------
+def launch_gradio():
     ensure_dependencies()
+    global gr
 
-    global torch, whisper, Translator
+    with gr.Blocks(title="Whisper Subtitle Tool (Gradio)") as demo:
+        gr.Markdown(
+            """
+# Whisper Subtitle Tool (Gradio)
 
-    cwd, upload_dir, out_dir, font_dir = prepare_directories()
-    font_path = ensure_font(font_dir)
+1. 上傳影片檔（mp4, mkv, mov 等）  
+2. 選擇 Whisper 模型與翻譯語言  
+3. 點擊「Start」開始轉錄 + 翻譯 + 硬燒字幕  
 
-    video_path = get_video_file(upload_dir)
+輸出：  
+- 含字幕影片 (MP4)  
+- 原文文字稿 (.txt)  
+- 翻譯文字稿 (.txt)  
+- 日誌訊息 (log)
+"""
+        )
 
-    model = load_whisper_model()
+        with gr.Row():
+            video_input = gr.Video(
+                label="影片上傳 / Video upload",
+                sources=["upload"],
+                format="mp4",
+                interactive=True,
+            )
 
-    audio_path = extract_audio(video_path, upload_dir)
+        with gr.Row():
+            model_dropdown = gr.Dropdown(
+                label="Whisper 模型大小 / Model size",
+                choices=["tiny", "base", "small", "medium", "large"],
+                value="small",
+            )
+            target_lang_text = gr.Textbox(
+                label="翻譯目標語言代碼 / Target language code (e.g. en, zh-TW, ja)",
+                value="en",
+            )
 
-    language, segments, full_text = transcribe_audio(model, audio_path)
+        start_button = gr.Button("Start", variant="primary")
 
-    target_lang, translated_segments, full_translated_text = translate_segments(
-        segments
-    )
+        with gr.Row():
+            video_output = gr.Video(
+                label="含字幕影片 / Subtitled video",
+            )
 
-    save_transcripts(
-        video_path,
-        out_dir,
-        full_text,
-        full_translated_text,
-        target_lang,
-    )
+        with gr.Row():
+            orig_txt_output = gr.File(label="原文文字稿 / Original transcript (.txt)")
+            tr_txt_output = gr.File(label="翻譯文字稿 / Translated transcript (.txt)")
 
-    vf_filter, output_label = build_drawtext_filter(
-        video_path, translated_segments, font_path
-    )
+        log_output = gr.Textbox(
+            label="日誌 / Logs",
+            lines=20,
+            interactive=False,
+        )
 
-    burn_subtitles(
-        video_path,
-        out_dir,
-        vf_filter,
-        output_label,
-        target_lang,
-    )
+        start_button.click(
+            fn=process_video,
+            inputs=[video_input, model_dropdown, target_lang_text],
+            outputs=[video_output, orig_txt_output, tr_txt_output, log_output],
+        )
+
+    # In Colab: share=True to get a public link
+    demo.launch(server_name="0.0.0.0", server_port=7860, share=True)
 
 
 if __name__ == "__main__":
-    main()
+    launch_gradio()
