@@ -1,32 +1,27 @@
-# whisper_sub_burner_colab.py
-# 專為 Google Colab 設計的版本：使用者可透過上傳按鈕選擇影片檔，
-# 然後自動執行：抽取音訊 -> Whisper 轉錄 -> Google 翻譯 -> FFmpeg drawtext 硬燒字幕。
+# ==========================================
+# 0. 安裝必要套件 / Install dependencies
+# ==========================================
+!pip install -q "git+https://github.com/openai/whisper.git" googletrans==4.0.0-rc1
 
 import os
 import json
-import subprocess
 from pathlib import Path
+import subprocess
+import shlex
 
 import torch
 import whisper
 from googletrans import Translator
-
-try:
-    from google.colab import files
-    from IPython.display import Audio, display
-except ImportError:
-    raise SystemExit(
-        "這個腳本只適用於 Google Colab 環境。\n"
-        "This script is intended to run in Google Colab only."
-    )
+from google.colab import files
+from IPython.display import Audio, display
 
 # ==========================================
 # 1. 準備目錄 / Prepare directories
 # ==========================================
 CWD = Path(".").resolve()
 UPLOAD_DIR = CWD / "uploads"
-OUT_DIR = CWD / "transcripts"
-FONT_DIR = CWD / "fonts"
+OUT_DIR    = CWD / "transcripts"
+FONT_DIR   = CWD / "fonts"
 
 for d in (UPLOAD_DIR, OUT_DIR, FONT_DIR):
     d.mkdir(exist_ok=True)
@@ -34,41 +29,28 @@ for d in (UPLOAD_DIR, OUT_DIR, FONT_DIR):
 print("工作目錄 / Working dir:", CWD)
 
 # ==========================================
-# 2. 下載字型 Noto Sans / Download font
+# 2. 下載字型（Noto Sans CJK） / Download font
 # ==========================================
-FONT_PATH = FONT_DIR / "NotoSans-Regular.ttf"
+FONT_PATH = FONT_DIR / "NotoSansCJK-Regular.ttc"
+if not FONT_PATH.exists():
+    print("下載字型 Noto Sans CJK ... / Downloading Noto Sans CJK ...")
+    # Using a more reliable font source from Noto CJK repo
+    !wget -q -O "fonts/NotoSansCJK-Regular.ttc" \
+      "https://github.com/google/fonts/raw/main/ofl/notosanssc/NotoSansSC-Regular.otf"
 
 if not FONT_PATH.exists():
-    print("下載字型 Noto Sans ... / Downloading Noto Sans ...")
-    font_url = (
-        "https://github.com/google/fonts/raw/main/ofl/notosans/"
-        "NotoSans-Regular.ttf"
-    )
-    cmd_font = [
-        "wget",
-        "-q",
-        "-O",
-        str(FONT_PATH),
-        font_url,
-    ]
-    proc_font = subprocess.run(cmd_font)
-    if proc_font.returncode != 0 or not FONT_PATH.exists():
-        raise SystemExit(
-            "字型下載失敗，請重新執行本腳本。\n"
-            "Font download failed; please rerun this script."
-        )
+    raise SystemExit("字型下載失敗，請重跑 cell 再試。/ Font download failed, rerun the cell.")
 
 print("使用字型 / Using font:", FONT_PATH)
 
 # ==========================================
-# 3. 上傳影片檔（Colab 按鈕） / Upload video via Colab
+# 3. 上傳影片檔 / Upload video
 # ==========================================
 print("\n請上傳要處理的影片檔（mp4, mkv, mov 等）")
 uploaded = files.upload()
 if not uploaded:
     raise SystemExit("未上傳任何檔案 / No file uploaded.")
 
-# 只處理第一個檔案 / Only process the first uploaded file
 up_name = list(uploaded.keys())[0]
 tmp_path = Path(up_name)
 video_path = UPLOAD_DIR / up_name
@@ -81,7 +63,7 @@ if not video_path.exists():
 print("影片路徑 / Video path:", video_path)
 
 # ==========================================
-# 4. 載入 Whisper 模型 / Load Whisper model
+# 4. Whisper 模型 / Model
 # ==========================================
 print("\n選擇 Whisper 模型大小 (tiny / base / small / medium / large)")
 model_name = input("模型大小 [預設 small]: ").strip() or "small"
@@ -92,42 +74,30 @@ model = whisper.load_model(model_name, device=device)
 print("模型已載入 / Model loaded.\n")
 
 # ==========================================
-# 5. 抽取音訊 / Extract audio from video
+# 5. 抽取音訊 / Extract audio
 # ==========================================
 audio_path = UPLOAD_DIR / f"{video_path.stem}.m4a"
 if not audio_path.exists():
     print("從影片抽取音訊 ... / Extracting audio from video ...")
-    cmd_audio = [
-        "ffmpeg",
-        "-y",
-        "-i",
-        str(video_path),
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(video_path),
         "-vn",
-        "-acodec",
-        "aac",
-        "-b:a",
-        "192k",
+        "-acodec", "aac",
+        "-b:a", "192k",
         str(audio_path),
     ]
-    proc_audio = subprocess.run(cmd_audio, text=True, capture_output=True)
-    if proc_audio.returncode != 0:
-        print("=== ffmpeg stdout ===")
-        print(proc_audio.stdout)
-        print("\n=== ffmpeg stderr ===")
-        print(proc_audio.stderr)
-        raise SystemExit("抽取音訊失敗 / Failed to extract audio.")
+    # capture_output=True 方便 debug
+    subprocess.run(cmd, check=True, capture_output=True)
 
 if not audio_path.exists():
-    raise SystemExit("抽取音訊失敗（無音訊檔）/ Failed to extract audio (file missing).")
+    raise SystemExit("抽取音訊失敗 / Failed to extract audio.")
 
 print("音訊檔案 / Audio file:", audio_path)
-try:
-    display(Audio(filename=str(audio_path)))
-except Exception as e:
-    print("Colab 無法直接播放音訊，略過播放。/ Cannot auto-play audio, skipping.", e)
+display(Audio(filename=str(audio_path)))
 
 # ==========================================
-# 6. Whisper 轉錄 / Transcribe with Whisper
+# 6. Whisper 轉錄 / Transcribe
 # ==========================================
 print("\n使用 Whisper 轉錄（自動偵測語言） / Transcribing with auto language detection ...")
 result = model.transcribe(str(audio_path), task="transcribe", verbose=False)
@@ -158,7 +128,7 @@ print("\n開始翻譯字幕 ... / Translating segments ...")
 translator = Translator()
 translated_segments = []
 
-for i, seg in enumerate(segments, start=1):
+for seg in segments:
     orig = seg.get("text", "").strip()
     if not orig:
         t_txt = ""
@@ -167,7 +137,7 @@ for i, seg in enumerate(segments, start=1):
             t = translator.translate(orig, dest=target_lang)
             t_txt = t.text
         except Exception as e:
-            print(f"[段落 {i}] 翻譯失敗，改用原文 / Translation failed, using original:", e)
+            print("翻譯失敗，改用原文 / Translation failed, using original:", e)
             t_txt = orig
 
     ns = seg.copy()
@@ -184,7 +154,7 @@ print(full_translated_text[:300] + ("..." if len(full_translated_text) > 300 els
 # ==========================================
 base = video_path.stem
 txt_orig = OUT_DIR / f"{base}_original.txt"
-txt_tr = OUT_DIR / f"{base}_translated_{target_lang}.txt"
+txt_tr   = OUT_DIR / f"{base}_translated_{target_lang}.txt"
 
 txt_orig.write_text(full_text, encoding="utf-8")
 txt_tr.write_text(full_translated_text, encoding="utf-8")
@@ -194,41 +164,32 @@ print("  ", txt_orig)
 print("  ", txt_tr)
 
 # ==========================================
-# 10. 建立 filter_complex 字串 / Build filter_complex
+# 10. 建立 filter_complex 字串（用 label 串接多個 drawtext）
 # ==========================================
 print("\n建立 drawtext 濾鏡字串 ... / Building drawtext filter string ...")
 
-# 取得影片解析度 / Get video resolution
+# 取解析度，算字體大小
 probe_cmd = [
-    "ffprobe",
-    "-v",
-    "error",
-    "-select_streams",
-    "v:0",
-    "-show_entries",
-    "stream=width,height",
-    "-of",
-    "json",
+    "ffprobe", "-v", "error",
+    "-select_streams", "v:0",
+    "-show_entries", "stream=width,height",
+    "-of", "json",
     str(video_path),
 ]
-probe = subprocess.run(probe_cmd, capture_output=True, text=True)
-if probe.returncode != 0:
-    print("=== ffprobe stderr ===")
-    print(probe.stderr)
-    raise SystemExit("無法取得影片解析度 / Failed to get video resolution.")
-
+probe = subprocess.run(probe_cmd, capture_output=True, text=True, check=True)
 info = json.loads(probe.stdout)
 vw = info["streams"][0]["width"]
 vh = info["streams"][0]["height"]
-font_size = max(24, int(vh * 0.05))  # 5% of height
+font_size = max(24, int(vh * 0.05))  # Slightly larger for readability
 
 print(f"影片解析度 / Video resolution: {vw}x{vh}, 字體大小 / font size: {font_size}")
 
+# ffmpeg 在 Linux 路徑不用特別 escape ':'，這行對 Colab 其實可省
 fontfile_str = str(FONT_PATH)
 
-# 建立 drawtext 濾鏡鏈 / Build drawtext chain
+# ffmpeg filter chain: [0:v] drawtext=... [v1]; [v1] drawtext=... [v2]; ... [last] = output
 filter_parts = []
-input_label = "[0:v]"
+input_label = "[0:v]"  # start from input video
 idx = 0
 
 for seg in translated_segments:
@@ -236,22 +197,28 @@ for seg in translated_segments:
     if not txt:
         continue
 
-    start = float(seg.get("start", 0.0))
-    end = float(seg.get("end", start + 1.0))
+    start = seg.get("start", 0.0)
+    end   = seg.get("end", start + 1.0)
 
-    # 稍微延長結束時間，減少閃爍 / Extend end time slightly
+    # 為了避免邊界問題，尾端加一點點 buffer
     end = end + 0.05
 
-    # 文字跳脫 / Escape for ffmpeg drawtext
+    # ===== 正確 escape 給 ffmpeg drawtext =====
+    # - \  -> \\
+    # - '  -> 變成全形 ’，避免破壞單引號包住的字串
+    # - :  -> \:
+    # - ,  -> \,
+    # - %  -> %%
+    # ==========================================
     safe_text = (
         txt.replace("\\", "\\\\")
-        .replace("'", "’")        # avoid single quote issues
-        .replace(":", "\\:")      # ffmpeg syntax
-        .replace(",", "\\,")
-        .replace("%", "%%")
+           .replace("'", "’")
+           .replace(":", "\\:")
+           .replace(",", "\\,")
+           .replace("%", "%%")
     )
 
-    output_label = f"[v{idx + 1}]"
+    output_label = f"[v{idx+1}]"
 
     draw = (
         f"{input_label}drawtext=fontfile='{fontfile_str}':"
@@ -269,6 +236,7 @@ for seg in translated_segments:
 if idx == 0:
     raise SystemExit("沒有任何字幕內容可以畫 / No subtitle lines to render.")
 
+# 最終輸出 label
 output_label = input_label
 vf_filter = "; ".join(filter_parts)
 
@@ -276,50 +244,41 @@ print("\n濾鏡字串前 1000 字 / Filter string first 1000 chars:")
 print(vf_filter[:1000] + ("..." if len(vf_filter) > 1000 else ""))
 
 # ==========================================
-# 11. ffmpeg 硬燒字幕 / Burn subtitles with ffmpeg
+# 11. ffmpeg -filter_complex 硬燒字幕 / Burn subtitles
 # ==========================================
 out_mp4 = OUT_DIR / f"{base}_sub_{target_lang}_drawtext.mp4"
 
 cmd_burn = [
-    "ffmpeg",
-    "-y",
-    "-i",
-    str(video_path),
-    "-filter_complex",
-    vf_filter,
-    "-map",
-    output_label,
-    "-map",
-    "0:a?",
-    "-c:v",
-    "libx264",
-    "-preset",
-    "fast",
-    "-crf",
-    "22",
-    "-c:a",
-    "copy",
+    "ffmpeg", "-y",
+    "-i", str(video_path),
+    "-filter_complex", vf_filter,
+    "-map", output_label,     # 使用最後的視訊 label
+    "-map", "0:a?",           # 原始音訊（如果有）
+    "-c:v", "libx264",        # Explicitly set video codec
+    "-preset", "fast",        # Faster encoding
+    "-crf", "22",             # Good quality/size balance
+    "-c:a", "copy",
     str(out_mp4),
 ]
 
 print("\n執行 ffmpeg 硬燒字幕 / Running ffmpeg to burn subtitles ...")
-print("Command:")
-print(" ", " ".join(cmd_burn))
+print("Command (shell escaped):")
+print(" ", " ".join(shlex.quote(c) for c in cmd_burn))
 print("\n=== ffmpeg output ===\n")
 
-proc_burn = subprocess.run(cmd_burn, capture_output=True, text=True)
+proc = subprocess.run(cmd_burn, capture_output=True, text=True)
 
-if proc_burn.returncode == 0:
-    # ffmpeg 主要把進度印在 stderr
-    print(proc_burn.stderr)
+if proc.returncode == 0:
+    # ffmpeg 進度都在 stderr
+    print(proc.stderr)
     print("\n✅ 成功產生含字幕影片 / Subtitled video created:")
     print("  ", out_mp4)
-    print("\n請在左側 Files 面板展開 transcripts/，右鍵下載該 mp4。")
+    print("\n請在左側 Files 面板展開 transcripts/，下載該 mp4。")
 else:
     print("=== ffmpeg stdout ===")
-    print(proc_burn.stdout)
+    print(proc.stdout)
     print("\n=== ffmpeg stderr ===")
-    print(proc_burn.stderr)
-    print("ffmpeg return code:", proc_burn.returncode)
+    print(proc.stderr)
+    print("ffmpeg return code:", proc.returncode)
     print("\n❌ 產生含字幕影片失敗 / Failed to create subtitled video.")
     print("請把上面 ffmpeg 輸出全部貼給我，我幫你看錯誤原因。")
