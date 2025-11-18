@@ -1,7 +1,5 @@
 # Whisper Colab 硬字幕產生器 / Hardsub Generator
 
----
-
 # 繁體中文說明
 
 這是一個專為 Google Colab 設計的 Python 腳本，可以自動化為影片產生並「硬燒」翻譯字幕的完整流程。您只需要上傳影片，腳本就會利用 OpenAI 的 Whisper 模型進行語音轉錄，透過 Google Translate 進行翻譯，最後使用 FFmpeg 將字幕直接嵌入影片畫面中。
@@ -51,10 +49,6 @@
 *   Google 翻譯有其使用限制與準確度問題，對於較長的影片或專業術語，翻譯結果可能不盡理想。
 *   處理時間受影片長度、Whisper 模型大小以及 Colab 分配的硬體資源影響，可能需要數分鐘到數小時不等。
 *   字幕的樣式（字體大小、位置、顏色）已在腳本中預設，如需客製化，請直接修改 Python 腳本中的 `drawtext` 相關參數。
-
-## 📜 授權
-
-本專案採用 [MIT License](LICENSE) 授權。
 
 ---
 
@@ -107,7 +101,3 @@ After the script finishes, you will find the following files in the `transcripts
 *   Google Translate has its own usage limits and accuracy issues. The translation quality may not be perfect, especially for long videos or technical jargon.
 *   Processing time depends on video length, Whisper model size, and the hardware resources allocated by Colab. It can range from a few minutes to several hours.
 *   The subtitle style (font size, position, color) is preset in the script. If you need to customize it, you will have to modify the `drawtext` parameters directly in the Python script.
-
-## 📜 License
-
-This project is licensed under the [MIT License](LICENSE).
