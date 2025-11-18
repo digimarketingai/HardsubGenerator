@@ -151,7 +151,7 @@ def process_video(
 ):
     """
     Gradio callback:
-    - video_file: path to uploaded video (string) from Gradio Video component
+    - video_file: uploaded video (path or file-like) from Gradio Video component
     - model_name: Whisper model size
     - target_lang: translation target language (e.g. 'en', 'zh-TW', etc.)
 
@@ -173,12 +173,13 @@ def process_video(
     global torch, whisper, GoogleTranslator, gr  # imported in ensure_dependencies
 
     # -------------------------------------------------
-    # video_file from gr.Video(type="filepath") is a string path
+    # Handle different Gradio versions:
+    # - some pass a string path
+    # - some pass an object with a .name attribute
     # -------------------------------------------------
     if isinstance(video_file, str):
         temp_src = Path(video_file)
     else:
-        # just in case other Gradio versions pass a file object
         temp_src = Path(getattr(video_file, "name", str(video_file)))
 
     if not temp_src.exists():
@@ -458,7 +459,7 @@ def launch_gradio():
                 sources=["upload"],
                 format="mp4",
                 interactive=True,
-                type="filepath",  # IMPORTANT: give process_video a str path
+                # no 'type' argument: compatible with older Gradio
             )
 
         with gr.Row():
