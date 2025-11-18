@@ -22,12 +22,13 @@ def main():
     # ==========================================
     print("⏳ Installing dependencies...")
     # Use subprocess to control output and ensure quiet installation
+    # Added 'requests' for robust downloading.
     import subprocess
     import sys
     
     # This is the Python equivalent of: !pip install -q ...
     install_process = subprocess.run(
-        [sys.executable, '-m', 'pip', 'install', '-q', 'git+https://github.com/openai/whisper.git', 'googletrans==4.0.0-rc1'],
+        [sys.executable, '-m', 'pip', 'install', '-q', 'git+https://github.com/openai/whisper.git', 'googletrans==4.0.0-rc1', 'requests'],
         capture_output=True, text=True
     )
     if install_process.returncode != 0:
@@ -45,6 +46,7 @@ def main():
     import shlex
     import torch
     import whisper
+    import requests # For robust downloading
     from googletrans import Translator
     from google.colab import files
     from IPython.display import Audio, display
@@ -60,24 +62,51 @@ def main():
     print("\n工作目錄 / Working dir:", CWD)
 
     # ==========================================
-    # 2. 下載字型（Noto Sans CJK） / Download font
+    # 2. 下載字型（Noto Sans CJK） / Download font (with fallback)
     # ==========================================
     FONT_PATH = FONT_DIR / "NotoSansSC-Regular.otf"
+    
+    def download_file(url, destination):
+        """Downloads a file from a URL to a destination, with error handling."""
+        try:
+            print(f"   Attempting to download from: {url}")
+            with requests.get(url, stream=True) as r:
+                r.raise_for_status()  # Will raise an HTTPError for bad status codes
+                with open(destination, 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        f.write(chunk)
+            return True
+        except requests.exceptions.RequestException as e:
+            print(f"   Download failed: {e}")
+            return False
+
     if not FONT_PATH.exists():
         print("\n⏳ 下載字型 Noto Sans CJK ... / Downloading Noto Sans CJK ...")
-        font_url = "https://github.com/google/fonts/raw/main/ofl/notosanssc/NotoSansSC-Regular.otf"
-        # This is the Python equivalent of: !wget ...
-        font_process = subprocess.run(['wget', '-q', '-O', str(FONT_PATH), font_url], capture_output=True)
-        if font_process.returncode != 0 or not FONT_PATH.exists():
-            print("❌ 字型下載失敗，請重跑 cell 再試。/ Font download failed, rerun the cell.")
-            return
-    print("✅ 使用字型 / Using font:", FONT_PATH)
+        
+        # Primary URL (GitHub)
+        font_url_primary = "https://github.com/google/fonts/raw/main/ofl/notosanssc/NotoSansSC-Regular.otf"
+        
+        # Fallback URL (jsDelivr CDN)
+        font_url_fallback = "https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/notosanssc/NotoSansSC-Regular.otf"
+
+        if not download_file(font_url_primary, FONT_PATH):
+            print("   Primary download failed. Trying fallback URL...")
+            if not download_file(font_url_fallback, FONT_PATH):
+                print("❌ 字型下載失敗，主要來源與備用來源皆無法連線。請檢查網路連線或稍後再試。")
+                print("❌ Font download failed from both primary and fallback sources. Please check your network or try again later.")
+                return
+
+    if FONT_PATH.exists():
+        print("✅ 使用字型 / Using font:", FONT_PATH)
+    else:
+        # This case should not be reached if the logic above is correct
+        print("❌ 字型檔案不存在，無法繼續。/ Font file does not exist, cannot continue.")
+        return
 
     # ==========================================
     # 3. 上傳影片檔 / Upload video
     # ==========================================
-    # This is the Python equivalent of: !rm -rf {UPLOAD_DIR}/*
-    # It cleans up previous uploads to avoid confusion.
+    # Cleans up previous uploads to avoid confusion.
     for item in UPLOAD_DIR.glob('*'):
         if item.is_file():
             item.unlink()
