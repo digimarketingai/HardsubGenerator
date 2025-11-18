@@ -29,56 +29,81 @@ print("✅ Directories ensured to exist: ./fonts, ./videos, ./output")
 # ==========================================
 # 2. 下載字型（Noto Sans CJK） / Download Font
 # ==========================================
-# The downloaded file is .otf (OpenType Font). Using the correct extension is crucial.
+# This section has been refactored to encapsulate the download logic.
+# It still uses a primary and a fallback URL for robustness.
 FONT_NAME = "NotoSansSC-Regular.otf"
 FONT_PATH = FONT_DIR / FONT_NAME
 
-def download_file(url, destination):
+def download_font_with_fallback(font_filename, destination_path):
     """
-    Downloads a file from a URL to a destination path with error handling.
-    Returns True on success, False on failure.
+    Downloads the specified font, trying a primary URL first and then a fallback.
+
+    This function encapsulates the entire download process, including error handling
+    and logging for each attempt.
+
+    Args:
+        font_filename (str): The name of the font file (e.g., "NotoSansSC-Regular.otf").
+        destination_path (Path): The path object where the file will be saved.
+
+    Returns:
+        bool: True if download was successful, False otherwise.
     """
-    try:
-        print(f"   Attempting to download from: {url}")
-        with requests.get(url, stream=True, timeout=30) as r:
-            r.raise_for_status()  # Raise an exception for bad status codes (4xx or 5xx)
-            with open(destination, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    f.write(chunk)
-        print(f"   Successfully downloaded to {destination}")
-        return True
-    except requests.exceptions.RequestException as e:
-        print(f"   Download failed: {e}")
-        return False
-
-# --- Main Download Logic ---
-if not FONT_PATH.exists():
-    print("\n⏳ 下載字型 Noto Sans CJK ... / Downloading Noto Sans CJK ...")
-
+    # The font family is 'notosanssc' in the Google Fonts repository URL structure.
+    font_family_url_part = "notosanssc"
+    
     # URL 1: Primary source from the official Google Fonts GitHub repository.
-    font_url_primary = f"https://github.com/google/fonts/raw/main/ofl/notosanssc/{FONT_NAME}"
+    font_url_primary = f"https://github.com/google/fonts/raw/main/ofl/{font_family_url_part}/{font_filename}"
 
     # URL 2: Fallback source from the reliable jsDelivr CDN, which mirrors GitHub.
-    font_url_fallback = f"https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/notosanssc/{FONT_NAME}"
+    font_url_fallback = f"https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/{font_family_url_part}/{font_filename}"
 
-    # Try downloading from the primary source first.
-    if not download_file(font_url_primary, FONT_PATH):
-        print("\n   Primary download failed. Trying fallback URL...")
-        # If the primary fails, try the fallback.
-        if not download_file(font_url_fallback, FONT_PATH):
-            raise SystemExit(
-                "\n❌ 字型下載失敗，主要來源與備用來源皆無法連線。\n"
-                "❌ Font download failed from both primary and fallback sources.\n"
-                "   Please check your network connection or try running the script again later."
-            )
-        else:
-            print("✅ 字型已透過備用連結成功下載 / Font successfully downloaded via fallback link.")
-    else:
+    def _download_attempt(url, destination):
+        """Inner function to handle a single download attempt."""
+        try:
+            print(f"   Attempting to download from: {url}")
+            # Use a timeout to prevent the script from hanging indefinitely.
+            with requests.get(url, stream=True, timeout=30) as r:
+                r.raise_for_status()  # Raise an exception for bad status codes (4xx or 5xx)
+                with open(destination, 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        f.write(chunk)
+            print(f"   Successfully downloaded to {destination}")
+            return True
+        except requests.exceptions.RequestException as e:
+            print(f"   Download attempt failed: {e}")
+            return False
+
+    # --- Main Download Logic ---
+    print(f"\n⏳ 下載字型 {font_filename} ... / Downloading font {font_filename} ...")
+    if _download_attempt(font_url_primary, destination_path):
         print("✅ 字型已成功下載 / Font successfully downloaded.")
+        return True
+    else:
+        print("\n   Primary download failed. Trying fallback URL...")
+        if _download_attempt(font_url_fallback, destination_path):
+            print("✅ 字型已透過備用連結成功下載 / Font successfully downloaded via fallback link.")
+            return True
+        else:
+            # Both attempts failed
+            return False
+
+# --- Main Script Logic for Font ---
+# Check if the font file already exists to avoid re-downloading.
+if not FONT_PATH.exists():
+    # If the font doesn't exist, call the download function.
+    if not download_font_with_fallback(FONT_NAME, FONT_PATH):
+        # If the download function returns False (meaning both URLs failed), exit the script.
+        raise SystemExit(
+            "\n❌ 字型下載失敗，主要來源與備用來源皆無法連線。\n"
+            "❌ Font download failed from both primary and fallback sources.\n"
+ax"   Please check your network connection or try running the script again later."
+        )
 
 if FONT_PATH.exists():
     print(f"\n✅ 使用字型 / Using font: {FONT_PATH}")
 else:
+    # This case should be unreachable if the download fails due to the SystemExit above,
+    # but it serves as a final safeguard.
     raise SystemExit(f"❌ 字型檔案不存在 / Font file not found at: {FONT_PATH}")
 
 # ==========================================
@@ -109,7 +134,7 @@ print(f"\n✅ 範例字幕檔已建立 / Sample subtitle file created at: {SUBTI
 INPUT_VIDEO_PATH = VIDEO_DIR / "input.mp4"
 if not INPUT_VIDEO_PATH.exists():
     print(f"\n⏳ 正在建立 10 秒的黑色範例影片 / Creating a 10-second black sample video...")
-    # This ffmpeg command creates a 10-second, 640x360, black video.
+    # This ffmpeg command creates a 10-second, 640x360, black video with silent audio.
     ffmpeg_create_video_cmd = [
         'ffmpeg',
         '-f', 'lavfi',                 # Input format: libavfilter
@@ -141,8 +166,8 @@ OUTPUT_VIDEO_PATH = OUTPUT_DIR / "output_with_subtitles.mp4"
 print(f"\n⏳ 正在將字幕嵌入影片... / Burning subtitles into video...")
 
 # The font name 'Noto Sans SC' is the internal name of the font.
-# We must also tell ffmpeg where to find the font files.
-# The `force_style` parameter applies the font.
+# We must also tell ffmpeg where to find the font files using the `fontsdir` option.
+# The `force_style` parameter applies the font for rendering the subtitles.
 ffmpeg_burn_subtitles_cmd = [
     'ffmpeg',
     '-i', str(INPUT_VIDEO_PATH),
@@ -167,6 +192,8 @@ ffmpeg_burn_subtitles_cmd = [
 try:
     print("   Executing ffmpeg command:")
     print(f"   {' '.join(ffmpeg_burn_subtitles_cmd)}")
+    # Using capture_output=True will hide ffmpeg's progress, but is useful for debugging.
+    # If you want to see ffmpeg's progress in real-time, remove `capture_output`.
     subprocess.run(ffmpeg_burn_subtitles_cmd, check=True, capture_output=True, text=True)
     print("\n✅ 字幕嵌入成功！/ Subtitles burned successfully!")
     print(f"✅ 最終影片儲存於 / Final video saved at: {OUTPUT_VIDEO_PATH}")
