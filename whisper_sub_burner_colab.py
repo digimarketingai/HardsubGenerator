@@ -2,12 +2,12 @@
 # -*- coding: utf-8 -*-
 
 """
-whisper_gradio_tool.py
+whisper_sub_burner_colab.py
 
 Gradio-based UI for:
 1. Uploading a video (mp4, mkv, mov, etc.)
 2. Transcribing with OpenAI Whisper
-3. Translating subtitles with googletrans
+3. Translating subtitles with deep-translator (GoogleTranslator)
 4. Burning translated subtitles into the video with ffmpeg drawtext
 5. Returning:
    - Subtitled MP4
@@ -15,8 +15,14 @@ Gradio-based UI for:
    - Translated transcript .txt
    - Log text output
 
-Run (e.g. in Colab):
-    !python whisper_gradio_tool.py
+In Colab, before running this script, install dependencies once:
+
+    !pip install -U "httpx>=0.28.1" gradio "git+https://github.com/openai/whisper.git" deep-translator
+
+Then:
+
+    %cd /content/HardsubGenerator
+    !python whisper_sub_burner_colab.py
 """
 
 import sys
@@ -29,48 +35,24 @@ import tempfile
 import shutil
 
 # ----------------------------
-# 0. Dependencies & utilities
+# 0. Utilities
 # ----------------------------
 def run_cmd(cmd, check=True, capture_output=True, text=True):
     """Helper to run subprocess commands with basic error handling."""
     return subprocess.run(cmd, check=check, capture_output=capture_output, text=text)
 
 
-def ensure_pip_package(pkg_spec: str):
-    """
-    Install a Python package with pip if it's not available.
-    pkg_spec can be 'whisper' or 'git+https://github.com/openai/whisper.git', etc.
-    """
-    try:
-        if "git+" not in pkg_spec and "==" in pkg_spec:
-            mod_name = pkg_spec.split("==", 1)[0]
-        elif "git+" not in pkg_spec and "[" not in pkg_spec and "<" not in pkg_spec and ">" not in pkg_spec:
-            mod_name = pkg_spec
-        else:
-            mod_name = None
-
-        if mod_name:
-            __import__(mod_name)
-            return
-    except ImportError:
-        pass
-
-    print(f"Installing pip package: {pkg_spec} ...")
-    cmd = [sys.executable, "-m", "pip", "install", "-q", pkg_spec]
-    run_cmd(cmd, check=True, capture_output=False, text=False)
-    print(f"Installed: {pkg_spec}")
-
-
 def ensure_dependencies():
-    """Install or import all necessary dependencies."""
-    ensure_pip_package("git+https://github.com/openai/whisper.git")
-    ensure_pip_package("googletrans==4.0.0-rc1")
-    ensure_pip_package("gradio==4.44.0")  # version can be adjusted
+    """
+    Import dependencies.
 
-    global torch, whisper, Translator, gr
+    Assumes you already ran in the notebook:
+        !pip install -U "httpx>=0.28.1" gradio "git+https://github.com/openai/whisper.git" deep-translator
+    """
+    global torch, whisper, GoogleTranslator, gr
     import torch  # type: ignore
     import whisper  # type: ignore
-    from googletrans import Translator  # type: ignore
+    from deep_translator import GoogleTranslator  # type: ignore
     import gradio as gr  # type: ignore
 
 
@@ -162,6 +144,7 @@ def process_video(
         (subtitled_video, original_txt, translated_txt, log_text)
     """
     logs = []
+
     def log(*args):
         msg = " ".join(str(a) for a in args)
         print(msg)
@@ -170,14 +153,12 @@ def process_video(
     if video_file is None:
         return None, None, None, "請先上傳影片 / Please upload a video first."
 
-    # Ensure dependencies imported (once)
+    # Ensure dependencies imported
     ensure_dependencies()
-    global torch, whisper, Translator, gr  # imported above
+    global torch, whisper, GoogleTranslator, gr  # imported in ensure_dependencies
 
-    # Save uploaded file to UPLOAD_DIR with a sane name
-    # video_file is a tempfile path-like object (Gradio)
+    # Save uploaded file to UPLOAD_DIR with a unique name
     temp_src = Path(video_file.name)
-    # Build a new unique filename
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     ext = temp_src.suffix or ".mp4"
     base_name = f"upload_{timestamp}{ext}"
@@ -243,11 +224,15 @@ def process_video(
         log("Whisper 沒有產生任何段落 / No segments from Whisper.")
         return None, None, None, "\n".join(logs)
 
-    # 3.4 Translate segments
+    # 3.4 Translate segments using deep-translator
     target_lang = target_lang.strip() or "en"
     log("翻譯字幕語言 / Subtitle language:", target_lang)
 
-    translator = Translator()
+    def make_translator(lang_code: str):
+        # deep_translator uses 'zh-TW', 'zh-CN', 'ja', 'en', etc. directly
+        return GoogleTranslator(source="auto", target=lang_code)
+
+    translator = make_translator(target_lang)
     translated_segments = []
 
     log("開始翻譯字幕 ... / Translating segments ...")
@@ -257,8 +242,7 @@ def process_video(
             t_txt = ""
         else:
             try:
-                t = translator.translate(orig, dest=target_lang)
-                t_txt = t.text
+                t_txt = translator.translate(orig)
             except Exception as e:
                 log("翻譯失敗，改用原文 / Translation failed, using original:", e)
                 t_txt = orig
@@ -394,7 +378,6 @@ def process_video(
         log("❌ 產生含字幕影片失敗 / Failed to create subtitled video.")
         subtitled_video = None
 
-    # Gradio expects actual file paths or file-like objects
     return (
         subtitled_video,
         str(txt_orig),
