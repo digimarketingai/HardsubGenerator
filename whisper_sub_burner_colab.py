@@ -443,7 +443,9 @@ def process_video(
     info = json.loads(probe.stdout)
     vw = info["streams"][0]["width"]
     vh = info["streams"][0]["height"]
-    font_size = max(24, int(vh * 0.05))  # Slightly larger for readability
+
+    # *** FIXED FONT SIZE = 18 ***
+    font_size = 18
 
     log(f"影片解析度 / Video resolution: {vw}x{vh}, 字體大小 / font size: {font_size}")
 
@@ -603,7 +605,6 @@ def launch_gradio():
                 sources=["upload"],
                 format="mp4",
                 interactive=True,
-                # no 'type' argument: compatible with older Gradio
             )
 
         with gr.Row():
