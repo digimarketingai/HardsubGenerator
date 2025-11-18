@@ -98,24 +98,24 @@ def prepare_directories():
 def ensure_font(font_dir: Path) -> Path:
     """
     Download a suitable Noto Sans font for CJK if not present.
-    We keep the filename NotoSansCJK-Regular.ttc for compatibility
-    but the URL points to NotoSansSC-Regular.otf as in your code.
+    We keep the filename NotoSansCJK-Regular.ttc for compatibility,
+    but we download NotoSansTC-Regular.otf from the Noto CJK repo.
     """
     font_path = font_dir / "NotoSansCJK-Regular.ttc"
 
     if not font_path.exists():
         print("下載字型 Noto Sans CJK ... / Downloading Noto Sans CJK ...")
-        # Download using Python instead of shell wget
         import urllib.request
 
+        # More stable CJK font source (Traditional Chinese, works fine for CJK subtitles)
         url = (
-            "https://github.com/google/fonts/raw/main/ofl/notosanssc/"
-            "NotoSansSC-Regular.otf"
+            "https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/TraditionalChinese/"
+            "NotoSansTC-Regular.otf"
         )
-        tmp_font = font_dir / "NotoSansSC-Regular.otf"
+        tmp_font = font_dir / "NotoSansTC-Regular.otf"
         try:
             urllib.request.urlretrieve(url, str(tmp_font))
-            # Keep the filename that ffmpeg expects in the rest of the code
+            # Rename to the name the rest of the code expects
             tmp_font.rename(font_path)
         except Exception as e:
             raise SystemExit(
