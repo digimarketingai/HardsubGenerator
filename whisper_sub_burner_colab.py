@@ -85,7 +85,7 @@ def prepare_directories():
     cwd = Path(".").resolve()
     upload_dir = cwd / "uploads"
     out_dir = cwd / "transcripts"
-    font_dir = cwd / "fonts"  # kept, but we won't auto-download fonts
+    font_dir = cwd / "fonts"
     for d in (upload_dir, out_dir, font_dir):
         d.mkdir(exist_ok=True)
     print("工作目錄 / Working dir:", cwd)
@@ -93,75 +93,58 @@ def prepare_directories():
 
 
 # ------------------------------------------
-# 2. Choose / locate font (NO download)
+# 2. Download & install font (auto, from your URL)
 # ------------------------------------------
-def find_font_interactively(font_dir: Path) -> Path:
+def ensure_font(font_dir: Path) -> Path:
     """
-    Try to find an existing font on the system (no download).
-    If not found, ask the user to provide a path.
-
-    You can customize the list of candidate font paths below for
-    your environment (Colab, Linux, Windows, macOS, etc.).
+    Automatically download NotoSansCJK-Regular.ttc from the given ZIP URL
+    and place it under fonts/ as NotoSansCJK-Regular.ttc.
     """
-    # 1) If user already put a font in fonts/, prefer that.
-    user_fonts = list(font_dir.glob("*"))
-    user_fonts = [f for f in user_fonts if f.is_file() and f.suffix.lower() in {".ttf", ".otf", ".ttc"}]
-    if user_fonts:
-        print("偵測到使用者提供字型 / Found user-provided font:")
-        for i, p in enumerate(user_fonts):
-            print(f"  {i}: {p}")
-        choice = input(f"選擇字型編號 [預設 0]: ").strip() or "0"
-        try:
-            idx = int(choice)
-            font_path = user_fonts[idx]
-            print("使用字型 / Using font:", font_path)
-            return font_path
-        except Exception:
-            print("選擇無效，將改用系統字型搜尋。 / Invalid choice, trying system fonts...")
+    font_path = font_dir / "NotoSansCJK-Regular.ttc"
+    if font_path.exists():
+        print("使用已存在字型 / Using existing font:", font_path)
+        return font_path
 
-    # 2) Try some common system font paths (adjust as needed)
-    candidate_paths = [
-        # Common Noto fonts in many Linux distros / Colab
-        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/truetype/noto/NotoSansCJKtc-Regular.otf",
-        "/usr/share/fonts/truetype/noto/NotoSansTC-Regular.otf",
-        "/usr/share/fonts/truetype/noto/NotoSansSC-Regular.otf",
+    print("下載字型 Noto Sans CJK ... / Downloading Noto Sans CJK ...")
 
-        # Generic DejaVu (may not support all CJK, but okay for Latin)
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    import urllib.request
+    import zipfile
+    from io import BytesIO
 
-        # Windows examples (if you run locally on Windows, adapt as needed)
-        "C:/Windows/Fonts/msyh.ttc",  # Microsoft YaHei
-        "C:/Windows/Fonts/simhei.ttf",
-        "C:/Windows/Fonts/simsun.ttc",
+    url = "https://noto-website-2.storage.googleapis.com/pkgs/NotoSansCJK-Regular.ttc.zip"
 
-        # macOS examples
-        "/System/Library/Fonts/PingFang.ttc",
-        "/System/Library/Fonts/STHeiti Light.ttc",
-    ]
-
-    for p in candidate_paths:
-        fp = Path(p)
-        if fp.exists():
-            print("使用系統字型 / Using system font:", fp)
-            return fp
-
-    # 3) Ask user to input a font path
-    print(
-        "\n⚠ 找不到合適的字型檔。\n"
-        "Please provide a path to a TTF/OTF/TTC font that ffmpeg can use.\n"
-        "例如 (Example): /usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc\n"
-        "或是把字型檔放在 fonts/ 目錄下再輸入路徑。\n"
-    )
-    user_path = input("字型檔路徑 / Font file path: ").strip()
-    if not user_path:
+    try:
+        # Download zip into memory
+        with urllib.request.urlopen(url) as resp:
+            data = resp.read()
+    except Exception as e:
         raise SystemExit(
-            "未提供字型路徑，無法繼續。/ No font path provided; cannot continue."
+            f"字型下載失敗 / Font download failed: {e}\n"
+            "請確認網路連線後再試。/ Please check your network and retry."
         )
 
-    font_path = Path(user_path).expanduser().resolve()
+    # Unzip and extract .ttc
+    try:
+        with zipfile.ZipFile(BytesIO(data)) as zf:
+            # Find first .ttc inside zip
+            ttc_names = [n for n in zf.namelist() if n.lower().endswith(".ttc")]
+            if not ttc_names:
+                raise SystemExit("ZIP 中找不到 .ttc 字型檔 / No .ttc font in ZIP.")
+            # Use the first .ttc
+            ttc_name = ttc_names[0]
+            print("從 ZIP 取出字型 / Extracting font from ZIP:", ttc_name)
+            zf.extract(ttc_name, path=font_dir)
+            extracted_path = font_dir / ttc_name
+            # Move / rename to NotoSansCJK-Regular.ttc at root of fonts/
+            extracted_path.rename(font_path)
+    except Exception as e:
+        raise SystemExit(
+            f"解壓字型失敗 / Failed to unzip font: {e}\n"
+            "請檢查 ZIP 檔或重試。"
+        )
+
     if not font_path.exists():
-        raise SystemExit(f"找不到字型檔 / Font file not found: {font_path}")
+        raise SystemExit("字型安裝失敗 / Font installation failed.")
 
     print("使用字型 / Using font:", font_path)
     return font_path
@@ -494,7 +477,7 @@ def main():
     global torch, whisper, Translator  # imported in ensure_dependencies
 
     cwd, upload_dir, out_dir, font_dir = prepare_directories()
-    font_path = find_font_interactively(font_dir)  # <-- no download, just search / ask
+    font_path = ensure_font(font_dir)  # <-- auto download + install from your URL
 
     video_path = get_video_file(upload_dir)
 
