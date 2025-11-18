@@ -9,10 +9,14 @@ Gradio-based UI for:
 2. Transcribing with OpenAI Whisper
 3. Translating subtitles with deep-translator (GoogleTranslator)
 4. Burning translated subtitles into the video with ffmpeg drawtext
-5. Returning:
+5. Generating:
    - Subtitled MP4
    - Original transcript .txt
    - Translated transcript .txt
+   - Original SRT (.srt)
+   - Translated SRT (.srt)
+   - Bilingual comparison TXT (original + translation)
+   - Bilingual SRT (.srt)
    - Log text output
 
 This script will:
@@ -53,7 +57,6 @@ def install_dependencies():
         "git+https://github.com/openai/whisper.git",
         "deep-translator",
     ]
-    # Show live output for easier debugging
     proc = subprocess.run(cmd)
     if proc.returncode != 0:
         raise SystemExit("pip installation failed, please check the logs above.")
@@ -61,9 +64,7 @@ def install_dependencies():
 
 
 def ensure_dependencies():
-    """
-    Import dependencies (after they are installed).
-    """
+    """Import dependencies (after they are installed)."""
     global torch, whisper, GoogleTranslator, gr
     import torch  # type: ignore
     import whisper  # type: ignore
@@ -142,7 +143,103 @@ FONT_PATH = ensure_font(FONT_DIR)
 
 
 # ----------------------------
-# 3. Core processing function
+# 3. SRT helpers
+# ----------------------------
+def format_timestamp(seconds: float) -> str:
+    """
+    Format seconds to SRT timestamp: HH:MM:SS,mmm
+    """
+    if seconds < 0:
+        seconds = 0
+    ms = int(round(seconds * 1000))
+    s, ms = divmod(ms, 1000)
+    m, s = divmod(s, 60)
+    h, m = divmod(m, 60)
+    return f"{h:02}:{m:02}:{s:02},{ms:03}"
+
+
+def write_srt_from_segments(segments, path: Path, text_key: str = "text"):
+    """
+    Write a standard SRT file from Whisper segments.
+    text_key:
+        - "text" for original
+        - "translated_text" for translated
+    """
+    lines = []
+    idx = 1
+    for seg in segments:
+        txt = seg.get(text_key, "").strip()
+        if not txt:
+            continue
+        start = float(seg.get("start", 0.0))
+        end = float(seg.get("end", start + 1.0))
+        start_ts = format_timestamp(start)
+        end_ts = format_timestamp(end)
+        lines.append(str(idx))
+        lines.append(f"{start_ts} --> {end_ts}")
+        lines.append(txt)
+        lines.append("")  # blank line
+        idx += 1
+
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
+def write_bilingual_txt(segments, path: Path):
+    """
+    Bilingual comparison TXT:
+    Original line
+    Translated line
+
+    (blank line)
+    """
+    blocks = []
+    for seg in segments:
+        src = seg.get("text", "").strip()
+        tr = seg.get("translated_text", "").strip()
+        if not src and not tr:
+            continue
+        blocks.append(src)
+        blocks.append(tr)
+        blocks.append("")  # blank line
+
+    path.write_text("\n".join(blocks), encoding="utf-8")
+    return path
+
+
+def write_bilingual_srt(segments, path: Path):
+    """
+    Bilingual SRT:
+    Each cue:
+        Original
+        Translated
+    """
+    lines = []
+    idx = 1
+    for seg in segments:
+        src = seg.get("text", "").strip()
+        tr = seg.get("translated_text", "").strip()
+        if not src and not tr:
+            continue
+        start = float(seg.get("start", 0.0))
+        end = float(seg.get("end", start + 1.0))
+        start_ts = format_timestamp(start)
+        end_ts = format_timestamp(end)
+        lines.append(str(idx))
+        lines.append(f"{start_ts} --> {end_ts}")
+        if src:
+            lines.append(src)
+        if tr:
+            lines.append(tr)
+        lines.append("")  # blank line
+        idx += 1
+
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
+# ----------------------------
+# 4. Core processing function
 # ----------------------------
 def process_video(
     video_file,
@@ -155,8 +252,15 @@ def process_video(
     - model_name: Whisper model size
     - target_lang: translation target language (e.g. 'en', 'zh-TW', etc.)
 
-    Returns:
-        (subtitled_video, original_txt, translated_txt, log_text)
+    Returns (in order):
+        subtitled_video,
+        original_txt,
+        translated_txt,
+        original_srt,
+        translated_srt,
+        bilingual_txt,
+        bilingual_srt,
+        log_text
     """
     logs = []
 
@@ -166,17 +270,13 @@ def process_video(
         logs.append(msg)
 
     if video_file is None:
-        return None, None, None, "請先上傳影片 / Please upload a video first."
+        return (None,) * 7 + ("請先上傳影片 / Please upload a video first.",)
 
     # Ensure dependencies imported
     ensure_dependencies()
     global torch, whisper, GoogleTranslator, gr  # imported in ensure_dependencies
 
-    # -------------------------------------------------
-    # Handle different Gradio versions:
-    # - some pass a string path
-    # - some pass an object with a .name attribute
-    # -------------------------------------------------
+    # 4.1 handle uploaded video path / object
     if isinstance(video_file, str):
         temp_src = Path(video_file)
     else:
@@ -184,7 +284,7 @@ def process_video(
 
     if not temp_src.exists():
         log("找不到上傳的影片檔 / Uploaded video file not found:", temp_src)
-        return None, None, None, "\n".join(logs)
+        return (None,) * 7 + ("\n".join(logs),)
 
     # Save uploaded file to UPLOAD_DIR with a unique name
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -196,16 +296,16 @@ def process_video(
     video_path = dst
     log("影片已儲存 / Video saved:", video_path)
 
-    # 3.1 Load Whisper model
+    # 4.2 Load Whisper model
     device = "cuda" if torch.cuda.is_available() else "cpu"
     log(f"載入 Whisper 模型 {model_name} 在 {device} / Loading model on {device} ...")
     try:
         model = whisper.load_model(model_name, device=device)
     except Exception as e:
         log("載入模型失敗 / Failed to load model:", e)
-        return None, None, None, "\n".join(logs)
+        return (None,) * 7 + ("\n".join(logs),)
 
-    # 3.2 Extract audio with ffmpeg
+    # 4.3 Extract audio with ffmpeg
     audio_path = UPLOAD_DIR / f"{video_path.stem}.m4a"
     if not audio_path.exists():
         log("從影片抽取音訊 ... / Extracting audio from video ...")
@@ -223,21 +323,21 @@ def process_video(
         except subprocess.CalledProcessError as e:
             log("ffmpeg error (audio extraction):")
             log(e.stderr)
-            return None, None, None, "\n".join(logs)
+            return (None,) * 7 + ("\n".join(logs),)
 
     if not audio_path.exists():
         log("抽取音訊失敗 / Failed to extract audio.")
-        return None, None, None, "\n".join(logs)
+        return (None,) * 7 + ("\n".join(logs),)
 
     log("音訊檔案 / Audio file:", audio_path)
 
-    # 3.3 Transcribe with Whisper
+    # 4.4 Transcribe with Whisper
     log("使用 Whisper 轉錄（自動偵測語言） / Transcribing with auto language detection ...")
     try:
         result = model.transcribe(str(audio_path), task="transcribe", verbose=False)
     except Exception as e:
         log("Whisper 轉錄失敗 / Transcription failed:", e)
-        return None, None, None, "\n".join(logs)
+        return (None,) * 7 + ("\n".join(logs),)
 
     language = result.get("language", "unknown")
     segments = result.get("segments", [])
@@ -250,9 +350,9 @@ def process_video(
 
     if not segments:
         log("Whisper 沒有產生任何段落 / No segments from Whisper.")
-        return None, None, None, "\n".join(logs)
+        return (None,) * 7 + ("\n".join(logs),)
 
-    # 3.4 Translate segments using deep-translator
+    # 4.5 Translate segments using deep-translator
     target_lang = (target_lang or "en").strip()
     log("翻譯字幕語言 / Subtitle language:", target_lang)
 
@@ -284,7 +384,7 @@ def process_video(
     log("翻譯前 300 字 / First 300 chars of translation:")
     log(preview_tr)
 
-    # 3.5 Save transcripts
+    # 4.6 Save transcripts (TXT)
     base = video_path.stem
     txt_orig = OUT_DIR / f"{base}_original.txt"
     txt_tr = OUT_DIR / f"{base}_translated_{target_lang}.txt"
@@ -296,7 +396,24 @@ def process_video(
     log("  ", txt_orig)
     log("  ", txt_tr)
 
-    # 3.6 Build drawtext filter
+    # 4.7 Save SRT and bilingual files
+    srt_orig = OUT_DIR / f"{base}_original.srt"
+    srt_tr = OUT_DIR / f"{base}_translated_{target_lang}.srt"
+    bi_txt = OUT_DIR / f"{base}_bilingual_{target_lang}.txt"
+    bi_srt = OUT_DIR / f"{base}_bilingual_{target_lang}.srt"
+
+    write_srt_from_segments(segments, srt_orig, text_key="text")
+    write_srt_from_segments(translated_segments, srt_tr, text_key="translated_text")
+    write_bilingual_txt(translated_segments, bi_txt)
+    write_bilingual_srt(translated_segments, bi_srt)
+
+    log("SRT 與雙語檔案已儲存 / SRT and bilingual files saved:")
+    log("  ", srt_orig)
+    log("  ", srt_tr)
+    log("  ", bi_txt)
+    log("  ", bi_srt)
+
+    # 4.8 Build drawtext filter for hardsub
     log("建立 drawtext 濾鏡字串 ... / Building drawtext filter string ...")
 
     probe_cmd = [
@@ -311,7 +428,17 @@ def process_video(
     except subprocess.CalledProcessError as e:
         log("ffprobe error:")
         log(e.stderr)
-        return None, str(txt_orig), str(txt_tr), "\n".join(logs)
+        # 回傳所有文字檔 & SRT，影片為 None
+        return (
+            None,
+            str(txt_orig),
+            str(txt_tr),
+            str(srt_orig),
+            str(srt_tr),
+            str(bi_txt),
+            str(bi_srt),
+            "\n".join(logs),
+        )
 
     info = json.loads(probe.stdout)
     vw = info["streams"][0]["width"]
@@ -360,7 +487,16 @@ def process_video(
 
     if idx == 0:
         log("沒有任何字幕內容可以畫 / No subtitle lines to render.")
-        return None, str(txt_orig), str(txt_tr), "\n".join(logs)
+        return (
+            None,
+            str(txt_orig),
+            str(txt_tr),
+            str(srt_orig),
+            str(srt_tr),
+            str(bi_txt),
+            str(bi_srt),
+            "\n".join(logs),
+        )
 
     vf_filter = "; ".join(filter_parts)
     output_label = input_label
@@ -369,7 +505,7 @@ def process_video(
     preview_filter = vf_filter[:600] + ("..." if len(vf_filter) > 600 else "")
     log(preview_filter)
 
-    # 3.7 ffmpeg burn subtitles
+    # 4.9 ffmpeg burn subtitles
     out_mp4 = OUT_DIR / f"{base}_sub_{target_lang}_drawtext.mp4"
 
     cmd_burn = [
@@ -410,12 +546,16 @@ def process_video(
         subtitled_video,
         str(txt_orig),
         str(txt_tr),
+        str(srt_orig),
+        str(srt_tr),
+        str(bi_txt),
+        str(bi_srt),
         "\n".join(logs),
     )
 
 
 # ----------------------------
-# 4. Gradio interface
+# 5. Gradio interface
 # ----------------------------
 def launch_gradio():
     ensure_dependencies()
@@ -449,6 +589,10 @@ def launch_gradio():
 - 含字幕影片 (MP4)  
 - 原文文字稿 (.txt)  
 - 翻譯文字稿 (.txt)  
+- 原文字幕檔 (.srt)  
+- 翻譯字幕檔 (.srt)  
+- 雙語對照文字檔 (.txt)  
+- 雙語字幕檔 (.srt)  
 - 日誌訊息 (log)
 """
         )
@@ -485,6 +629,14 @@ def launch_gradio():
             orig_txt_output = gr.File(label="原文文字稿 / Original transcript (.txt)")
             tr_txt_output = gr.File(label="翻譯文字稿 / Translated transcript (.txt)")
 
+        with gr.Row():
+            orig_srt_output = gr.File(label="原文 SRT / Original subtitles (.srt)")
+            tr_srt_output = gr.File(label="翻譯 SRT / Translated subtitles (.srt)")
+
+        with gr.Row():
+            bi_txt_output = gr.File(label="雙語 TXT / Bilingual comparison (.txt)")
+            bi_srt_output = gr.File(label="雙語 SRT / Bilingual subtitles (.srt)")
+
         log_output = gr.Textbox(
             label="日誌 / Logs",
             lines=20,
@@ -494,7 +646,16 @@ def launch_gradio():
         start_button.click(
             fn=process_video,
             inputs=[video_input, model_dropdown, lang_dropdown],
-            outputs=[video_output, orig_txt_output, tr_txt_output, log_output],
+            outputs=[
+                video_output,
+                orig_txt_output,
+                tr_txt_output,
+                orig_srt_output,
+                tr_srt_output,
+                bi_txt_output,
+                bi_srt_output,
+                log_output,
+            ],
         )
 
     # In Colab or Spaces: share=True to get a public link
