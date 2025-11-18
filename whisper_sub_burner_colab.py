@@ -15,14 +15,10 @@ Gradio-based UI for:
    - Translated transcript .txt
    - Log text output
 
-In Colab, before running this script, install dependencies once:
-
+This script will:
+- Install required pip packages at startup:
     !pip install -U "httpx>=0.28.1" gradio "git+https://github.com/openai/whisper.git" deep-translator
-
-Then:
-
-    %cd /content/HardsubGenerator
-    !python whisper_sub_burner_colab.py
+- Then launch a Gradio app, suitable for Colab or Hugging Face Spaces.
 """
 
 import sys
@@ -31,7 +27,6 @@ import subprocess
 import shlex
 from pathlib import Path
 from datetime import datetime
-import tempfile
 import shutil
 
 # ----------------------------
@@ -42,12 +37,32 @@ def run_cmd(cmd, check=True, capture_output=True, text=True):
     return subprocess.run(cmd, check=check, capture_output=capture_output, text=text)
 
 
+def install_dependencies():
+    """
+    Install required dependencies via pip.
+
+    Equivalent to:
+        !pip install -U "httpx>=0.28.1" gradio \
+            "git+https://github.com/openai/whisper.git" deep-translator
+    """
+    print("Installing / updating required packages ...")
+    cmd = [
+        sys.executable, "-m", "pip", "install", "-U",
+        "httpx>=0.28.1",
+        "gradio",
+        "git+https://github.com/openai/whisper.git",
+        "deep-translator",
+    ]
+    # Show live output for easier debugging
+    proc = subprocess.run(cmd)
+    if proc.returncode != 0:
+        raise SystemExit("pip installation failed, please check the logs above.")
+    print("Dependencies installed / updated.\n")
+
+
 def ensure_dependencies():
     """
-    Import dependencies.
-
-    Assumes you already ran in the notebook:
-        !pip install -U "httpx>=0.28.1" gradio "git+https://github.com/openai/whisper.git" deep-translator
+    Import dependencies (after they are installed).
     """
     global torch, whisper, GoogleTranslator, gr
     import torch  # type: ignore
@@ -136,7 +151,7 @@ def process_video(
 ):
     """
     Gradio callback:
-    - video_file: temp file object from Gradio
+    - video_file: path to uploaded video (string) from Gradio Video component
     - model_name: Whisper model size
     - target_lang: translation target language (e.g. 'en', 'zh-TW', etc.)
 
@@ -157,8 +172,20 @@ def process_video(
     ensure_dependencies()
     global torch, whisper, GoogleTranslator, gr  # imported in ensure_dependencies
 
+    # -------------------------------------------------
+    # video_file from gr.Video(type="filepath") is a string path
+    # -------------------------------------------------
+    if isinstance(video_file, str):
+        temp_src = Path(video_file)
+    else:
+        # just in case other Gradio versions pass a file object
+        temp_src = Path(getattr(video_file, "name", str(video_file)))
+
+    if not temp_src.exists():
+        log("找不到上傳的影片檔 / Uploaded video file not found:", temp_src)
+        return None, None, None, "\n".join(logs)
+
     # Save uploaded file to UPLOAD_DIR with a unique name
-    temp_src = Path(video_file.name)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     ext = temp_src.suffix or ".mp4"
     base_name = f"upload_{timestamp}{ext}"
@@ -225,7 +252,7 @@ def process_video(
         return None, None, None, "\n".join(logs)
 
     # 3.4 Translate segments using deep-translator
-    target_lang = target_lang.strip() or "en"
+    target_lang = (target_lang or "en").strip()
     log("翻譯字幕語言 / Subtitle language:", target_lang)
 
     def make_translator(lang_code: str):
@@ -393,6 +420,21 @@ def launch_gradio():
     ensure_dependencies()
     global gr
 
+    # Common target language options
+    lang_choices = [
+        "en",    # English
+        "zh-TW", # Traditional Chinese
+        "zh-CN", # Simplified Chinese
+        "ja",    # Japanese
+        "ko",    # Korean
+        "fr",    # French
+        "es",    # Spanish
+        "de",    # German
+        "it",    # Italian
+        "pt",    # Portuguese
+        "ru",    # Russian
+    ]
+
     with gr.Blocks(title="Whisper Subtitle Tool (Gradio)") as demo:
         gr.Markdown(
             """
@@ -416,6 +458,7 @@ def launch_gradio():
                 sources=["upload"],
                 format="mp4",
                 interactive=True,
+                type="filepath",  # IMPORTANT: give process_video a str path
             )
 
         with gr.Row():
@@ -424,8 +467,9 @@ def launch_gradio():
                 choices=["tiny", "base", "small", "medium", "large"],
                 value="small",
             )
-            target_lang_text = gr.Textbox(
-                label="翻譯目標語言代碼 / Target language code (e.g. en, zh-TW, ja)",
+            lang_dropdown = gr.Dropdown(
+                label="翻譯目標語言 / Target language",
+                choices=lang_choices,
                 value="en",
             )
 
@@ -448,13 +492,15 @@ def launch_gradio():
 
         start_button.click(
             fn=process_video,
-            inputs=[video_input, model_dropdown, target_lang_text],
+            inputs=[video_input, model_dropdown, lang_dropdown],
             outputs=[video_output, orig_txt_output, tr_txt_output, log_output],
         )
 
-    # In Colab: share=True to get a public link
+    # In Colab or Spaces: share=True to get a public link
     demo.launch(server_name="0.0.0.0", server_port=7860, share=True)
 
 
 if __name__ == "__main__":
+    # Install dependencies, then launch app
+    install_dependencies()
     launch_gradio()
